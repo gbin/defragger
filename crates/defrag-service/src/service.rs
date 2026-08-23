@@ -10,12 +10,14 @@ use std::{
 
 use defrag_domain::{
     AnalysisId, DefragPolicy, DefragProgress, FragmentationMetrics, JobId, JobProgress,
-    PhysicalRange, PlanId, PlanSummary, ServiceEvent, SupportStatus, Volume, VolumeId,
+    OptimizationMode, PhysicalRange, PlanId, PlanSummary, ServiceEvent, SupportStatus, Volume,
+    VolumeId,
 };
 use thiserror::Error;
 
 use crate::{
-    EventSink, FilesystemAnalysis, FilesystemBackend, JobControl, default_backends, mounts,
+    AnalysisAccess, EventSink, FilesystemAnalysis, FilesystemBackend, JobControl, default_backends,
+    mounts,
 };
 
 #[derive(Debug, Error)]
@@ -34,6 +36,13 @@ pub enum ServiceError {
     PlanNotFound(PlanId),
     #[error("defragmentation execution is unavailable for this plan")]
     ExecutionUnavailable,
+    #[error("{mode:?} optimization is not supported for {filesystem}")]
+    UnsupportedOptimizationMode {
+        filesystem: String,
+        mode: OptimizationMode,
+    },
+    #[error("unsafe or inconsistent filesystem: {0}")]
+    UnsafeFilesystem(String),
     #[error("job was cancelled")]
     Cancelled,
     #[error("service state was poisoned")]
@@ -121,17 +130,22 @@ impl InProcessClient {
                     job_id,
                     sender: sender.clone(),
                 };
-                let mounted = match mounts::mount_for_job(&volume, false) {
-                    Ok(mounted) => mounted,
-                    Err(error) => {
-                        let _ = sender.send(ServiceEvent::Failed {
-                            job_id: Some(job_id),
-                            message: error.to_string(),
-                        });
-                        return;
+                let mounted = if backend.analysis_access(&volume) == AnalysisAccess::RawDevice {
+                    None
+                } else {
+                    match mounts::mount_for_job(&volume, false) {
+                        Ok(mounted) => Some(mounted),
+                        Err(error) => {
+                            let _ = sender.send(ServiceEvent::Failed {
+                                job_id: Some(job_id),
+                                message: error.to_string(),
+                            });
+                            return;
+                        }
                     }
                 };
-                match backend.analyze(&mounted.volume, job_id, thread_control.as_ref(), &sink) {
+                let analysis_volume = mounted.as_ref().map_or(&volume, |mounted| &mounted.volume);
+                match backend.analyze(analysis_volume, job_id, thread_control.as_ref(), &sink) {
                     Ok(analysis) => {
                         let analysis_id =
                             AnalysisId(inner.next_analysis.fetch_add(1, Ordering::Relaxed));

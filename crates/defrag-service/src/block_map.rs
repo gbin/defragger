@@ -183,6 +183,7 @@ impl BinAccumulator {
 fn metadata_category(kind: MetadataKind) -> usize {
     match kind {
         MetadataKind::FilesystemHeaders => FILESYSTEM_HEADERS,
+        MetadataKind::AllocationTables => ALLOCATION_TABLES,
         MetadataKind::Journal => JOURNAL,
         MetadataKind::FileMetadata => FILE_METADATA,
         MetadataKind::GroupDescriptors => GROUP_DESCRIPTORS,

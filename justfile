@@ -18,6 +18,9 @@ analyze device:
 defrag device:
     cargo run -r -p defragger-cli -- defrag {{device}} --yes --require-fully-defragmented
 
+compact device:
+    cargo run -r -p defragger-cli -- compact {{device}} --yes
+
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
@@ -28,6 +31,10 @@ check:
 # Root-capability ext4 loop-image test; the script elevates only required steps.
 integration-test:
     crates/defrag-service/tests/fixtures/run-ext4-fixture.sh
+    crates/defrag-service/tests/fixtures/run-fat-fixtures.sh
+
+integration-test-fat:
+    crates/defrag-service/tests/fixtures/run-fat-fixtures.sh
 
 # Build the production split-service configuration without installing it.
 system-build:

@@ -29,6 +29,7 @@ mod qobject {
         #[qproperty(i32, file_row_count)]
         #[qproperty(i32, plan_candidate_count)]
         #[qproperty(i32, plan_revision)]
+        #[qproperty(bool, plan_is_compact)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, paused)]
         #[qproperty(bool, has_report)]
@@ -53,6 +54,8 @@ mod qobject {
         #[qinvokable]
         fn build_plan(self: Pin<&mut Controller>);
         #[qinvokable]
+        fn build_compact_plan(self: Pin<&mut Controller>);
+        #[qinvokable]
         fn start_defrag(self: Pin<&mut Controller>);
         #[qinvokable]
         fn volume_id(self: &Controller, index: i32) -> QString;
@@ -70,6 +73,8 @@ mod qobject {
         fn volume_free_bytes(self: &Controller, index: i32) -> f64;
         #[qinvokable]
         fn volume_supported(self: &Controller, index: i32) -> bool;
+        #[qinvokable]
+        fn volume_can_compact(self: &Controller, index: i32) -> bool;
         #[qinvokable]
         fn volume_has_report(self: &Controller, index: i32) -> bool;
         #[qinvokable]
@@ -90,6 +95,8 @@ mod qobject {
         fn plan_candidate_current_runs(self: &Controller, index: i32) -> i32;
         #[qinvokable]
         fn plan_candidate_target_runs(self: &Controller, index: i32) -> i32;
+        #[qinvokable]
+        fn plan_candidate_is_support(self: &Controller, index: i32) -> bool;
         #[qinvokable]
         fn render_map(
             self: Pin<&mut Controller>,
@@ -228,6 +235,7 @@ pub struct ControllerRust {
     file_row_count: i32,
     plan_candidate_count: i32,
     plan_revision: i32,
+    plan_is_compact: bool,
     busy: bool,
     paused: bool,
     has_report: bool,
@@ -273,6 +281,7 @@ impl Default for ControllerRust {
             file_row_count: 0,
             plan_candidate_count: 0,
             plan_revision: 0,
+            plan_is_compact: false,
             busy: false,
             paused: false,
             has_report: false,
@@ -503,12 +512,23 @@ impl qobject::Controller {
     }
 
     fn build_plan(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .build_optimization_plan(defrag_domain::OptimizationMode::Defragment);
+    }
+
+    fn build_compact_plan(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .build_optimization_plan(defrag_domain::OptimizationMode::Compact);
+    }
+
+    fn build_optimization_plan(mut self: Pin<&mut Self>, mode: defrag_domain::OptimizationMode) {
         let Some(analysis_id) = self.analysis_id else {
             self.as_mut()
                 .set_status(QString::from("Analyze the selected volume first"));
             return;
         };
         let policy = DefragPolicy {
+            mode,
             minimum_excess_runs: 1,
             minimum_file_bytes: 0,
         };
@@ -525,11 +545,18 @@ impl qobject::Controller {
                 self.as_mut().rust_mut().plan_id = Some(plan_id);
                 self.as_mut().set_plan_candidate_count(count);
                 self.as_mut()
+                    .set_plan_is_compact(mode == defrag_domain::OptimizationMode::Compact);
+                self.as_mut()
                     .set_plan_estimated_rewrite_bytes(estimated_rewrite_bytes);
                 let revision = self.plan_revision.wrapping_add(1).max(1);
                 self.as_mut().set_plan_revision(revision);
-                self.as_mut()
-                    .set_status(QString::from("Defragmentation plan ready"));
+                self.as_mut().set_status(QString::from(
+                    if mode == defrag_domain::OptimizationMode::Compact {
+                        "Compaction plan ready"
+                    } else {
+                        "Defragmentation plan ready"
+                    },
+                ));
             }
             Err(error) => self
                 .as_mut()
@@ -703,6 +730,13 @@ impl qobject::Controller {
         })
     }
 
+    fn volume_can_compact(&self, index: i32) -> bool {
+        self.volume_row(index).is_some_and(|volume| {
+            matches!(volume.filesystem.as_str(), "fat" | "msdos" | "vfat")
+                && volume.mount_state == defrag_domain::MountState::Unmounted
+        })
+    }
+
     fn volume_has_report(&self, index: i32) -> bool {
         self.volume_row(index)
             .is_some_and(|volume| self.analyses.contains_key(&volume.id))
@@ -759,6 +793,12 @@ impl qobject::Controller {
     fn plan_candidate_target_runs(&self, index: i32) -> i32 {
         self.plan_candidate(index)
             .map_or(0, |candidate| count_i32(candidate.target_runs as usize))
+    }
+
+    fn plan_candidate_is_support(&self, index: i32) -> bool {
+        self.plan_candidate(index).is_some_and(|candidate| {
+            candidate.role == defrag_domain::PlanCandidateRole::CompactionSupport
+        })
     }
 
     fn file_row(&self, index: i32) -> Option<&FileReport> {

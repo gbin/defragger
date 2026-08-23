@@ -139,8 +139,17 @@ pub struct AnalysisReport {
     pub warnings: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum OptimizationMode {
+    #[default]
+    Defragment,
+    Compact,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DefragPolicy {
+    #[serde(default)]
+    pub mode: OptimizationMode,
     pub minimum_excess_runs: u32,
     pub minimum_file_bytes: u64,
 }
@@ -165,6 +174,15 @@ pub struct PlanCandidate {
     pub rewrite_bytes: u64,
     pub current_runs: u32,
     pub target_runs: u32,
+    #[serde(default)]
+    pub role: PlanCandidateRole,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PlanCandidateRole {
+    #[default]
+    FragmentationTarget,
+    CompactionSupport,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -189,6 +207,9 @@ pub enum DefragPhase {
     Revalidating,
     AllocatingDonor,
     MovingExtents,
+    EvacuatingClusters,
+    VerifyingData,
+    CommittingMetadata,
     RefreshingMap,
 }
 

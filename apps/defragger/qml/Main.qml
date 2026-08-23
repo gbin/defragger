@@ -368,6 +368,7 @@ Kirigami.ApplicationWindow {
             Layout.fillWidth: true
             Controls.Button { text: qsTr("Analyze"); icon.name: "system-search"; enabled: window.selectedIndex >= 0 && !controller.busy; onClicked: window.analyzeSelected() }
             Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && window.selectedHasReport; onClicked: controller.build_plan() }
+            Controls.Button { text: qsTr("Compact…"); icon.name: "transform-move"; enabled: !controller.busy && window.selectedHasReport && controller.volume_can_compact(window.selectedIndex); onClicked: controller.build_compact_plan() }
             Item { Layout.preferredWidth: Kirigami.Units.largeSpacing }
             Controls.Button { text: controller.paused ? qsTr("Resume") : qsTr("Pause"); enabled: controller.busy; onClicked: controller.paused ? controller.resume() : controller.pause() }
             Controls.Button { text: qsTr("Stop"); icon.name: "process-stop"; enabled: controller.busy; onClicked: controller.stop() }
@@ -382,11 +383,11 @@ Kirigami.ApplicationWindow {
         width: Math.min(window.width - 80, 720)
         height: Math.min(window.height - 80, 520)
         modal: true
-        title: qsTr("Defragmentation plan preview")
+        title: controller.plan_is_compact ? qsTr("Compaction plan preview") : qsTr("Defragmentation plan preview")
         standardButtons: Controls.Dialog.Close
         ColumnLayout {
             anchors.fill: parent
-            Controls.Label { text: qsTr("The helper will revalidate every file before moving it."); font.bold: true; color: Kirigami.Theme.neutralTextColor }
+            Controls.Label { text: controller.plan_is_compact ? qsTr("Compaction may move already-contiguous supporting files. The volume must remain unmounted.") : qsTr("The helper will revalidate every file before moving it."); font.bold: true; color: Kirigami.Theme.neutralTextColor; wrapMode: Text.Wrap }
             Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(window.integer(controller.plan_candidate_count)).arg(window.bytes(controller.plan_estimated_rewrite_bytes)); wrapMode: Text.Wrap }
             ListView {
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true
@@ -397,11 +398,12 @@ Kirigami.ApplicationWindow {
                     text: controller.plan_candidate_path(index) + "  "
                         + controller.plan_candidate_current_runs(index) + " → "
                         + controller.plan_candidate_target_runs(index) + " " + qsTr("fragments")
+                        + (controller.plan_candidate_is_support(index) ? "  [" + qsTr("supporting move") + "]" : "")
                 }
             }
             Controls.Button {
                 Layout.alignment: Qt.AlignRight
-                text: qsTr("Start defragmentation")
+                text: controller.plan_is_compact ? qsTr("Start compaction") : qsTr("Start defragmentation")
                 icon.name: "media-playback-start"
                 enabled: controller.plan_candidate_count > 0 && !controller.busy
                 onClicked: {

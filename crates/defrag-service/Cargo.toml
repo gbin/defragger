@@ -12,7 +12,11 @@ development-client = ["system-helper-client"]
 
 [dependencies]
 defrag-domain = { path = "../defrag-domain" }
+fat-core.workspace = true
 libc.workspace = true
 serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
 zbus = { workspace = true, optional = true }
+
+[dev-dependencies]
+fatfs = { version = "0.3.6", default-features = false, features = ["alloc", "std"] }

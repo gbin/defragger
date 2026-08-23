@@ -14,8 +14,8 @@ use std::{
 use defrag_domain::{
     AnalysisCompleteness, AnalysisPhase, AnalysisReport, DefragPhase, DefragPolicy, DefragProgress,
     ExecutionRequirements, FileReport, FragmentationMetrics, JobId, JobProgress, MountState,
-    PhysicalRange, PlanCandidate, PlanSummary, RequiredMountState, ScanCoverage, SupportStatus,
-    Volume,
+    OptimizationMode, PhysicalRange, PlanCandidate, PlanCandidateRole, PlanSummary,
+    RequiredMountState, ScanCoverage, SupportStatus, Volume,
 };
 
 use crate::{
@@ -442,6 +442,12 @@ impl FilesystemAnalysis for Ext4Analysis {
     }
 
     fn build_plan(&self, policy: &DefragPolicy) -> Result<Box<dyn PreparedPlan>, ServiceError> {
+        if policy.mode != OptimizationMode::Defragment {
+            return Err(ServiceError::UnsupportedOptimizationMode {
+                filesystem: "ext4".to_owned(),
+                mode: policy.mode,
+            });
+        }
         let minimum_excess = policy.minimum_excess_runs.max(1);
         let mut candidates: Vec<_> = self
             .report
@@ -457,6 +463,7 @@ impl FilesystemAnalysis for Ext4Analysis {
                 rewrite_bytes: file.allocated_bytes,
                 current_runs: file.physical_runs,
                 target_runs: file.minimum_runs.max(1),
+                role: PlanCandidateRole::FragmentationTarget,
             })
             .collect();
         candidates.sort_by(|left, right| {

@@ -41,7 +41,7 @@ execute across the privilege boundary.
   filesystem metadata, so supported unmounted volumes remain selectable.
 - ext4's physical allocation map comes from `FS_IOC_GETFSMAP`.
 - Per-file physical extents come from unsynchronized `FS_IOC_FIEMAP`.
-- FAT12/16/32 and exFAT share a file-mapping reader. It tries FIEMAP first and
+- Mounted FAT12/16/32 and exFAT share a file-mapping reader. It tries FIEMAP first and
   falls back to FIBMAP, which Linux restricts to `CAP_SYS_RAWIO`. Linux also
   does not provide their filesystem-wide allocation map, so unobserved space
   remains unknown and those reports are marked partial.
@@ -49,7 +49,8 @@ execute across the privilege boundary.
 - No filesystem utility or shell command is spawned. Development mode invokes
   only `systemd-run` to establish the privilege boundary. Entries that remain
   inaccessible or cannot be mapped are counted and make the report explicitly
-  partial.
+  partial. Unmounted classic FAT uses a raw parser instead, producing a complete
+  allocation map when its FAT copies and chains validate.
 
 The backend maintains 4,096 physical-range bins. The GUI reevaluates its tile
 count from the available pixel area and combines adjacent bins to fill the map
@@ -67,7 +68,7 @@ As files are inspected or moved, the backend publishes coherent replacement
 maps. During a move it also publishes exact source/read and donor/write ranges,
 which the GUI draws as differently colored contours.
 
-## Privileged ext4 write path
+## Privileged write paths
 
 The clients never run as root. `StartDefrag` uses the separate
 `net.gootz.defragger.modify-filesystem` PolicyKit action. The helper reopens and
@@ -81,5 +82,23 @@ before events are published. Cancellation is observed before a move or after
 this cleanup boundary. There is no shell command, `e4defrag`, or root GUI
 fallback.
 
+The FAT16/FAT32 writer only accepts an unmounted, clean, mirrored classic FAT
+snapshot. It reparses and compares the boot sector, allocation tables, file
+chains, and directory slots immediately before opening the write path. FAT12
+and exFAT are never written.
+
+Defrag mode moves only fragmented policy candidates that already have a wholly
+free contiguous destination. Compact mode packs safely movable regular files
+toward low cluster addresses; directories, bad clusters, oversized files, and
+other hard pins divide the packed regions. A contiguous file moved only to make
+packing possible is identified as a supporting move in the plan.
+
+Each cluster copy is read back before metadata points at it. The writer then
+installs the destination FAT chain, flushes it, pivots the short directory
+entry, flushes again, and finally frees the old chain. Mirrored FAT copies are
+updated with FAT1 last, and FAT32 FSInfo is refreshed at completion. FAT has no
+journal, so a crash can still leave unreferenced allocated clusters for fsck,
+but the ordering does not expose an unverified destination as file data.
+
 `FilesystemBackend`, `FilesystemAnalysis`, and `PreparedPlan` keep filesystem
-details out of the clients. FAT and exFAT currently remain analysis-only.
+details out of the clients.

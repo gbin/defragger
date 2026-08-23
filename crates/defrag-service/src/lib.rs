@@ -1,4 +1,5 @@
 mod block_map;
+mod classic_fat;
 mod ext4;
 mod fat;
 mod linux;
@@ -43,9 +44,18 @@ pub struct PlanExecution {
     pub stopped: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnalysisAccess {
+    MountedReadOnly,
+    RawDevice,
+}
+
 pub trait FilesystemBackend: Send + Sync {
     fn id(&self) -> &'static str;
     fn probe(&self, volume: &Volume) -> SupportStatus;
+    fn analysis_access(&self, _volume: &Volume) -> AnalysisAccess {
+        AnalysisAccess::MountedReadOnly
+    }
     fn analyze(
         &self,
         volume: &Volume,

@@ -74,6 +74,7 @@ pub enum FsMapKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetadataKind {
     FilesystemHeaders,
+    AllocationTables,
     Journal,
     FileMetadata,
     GroupDescriptors,

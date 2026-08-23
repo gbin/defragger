@@ -7,8 +7,8 @@ use std::{
 };
 
 use defrag_domain::{
-    AnalysisId, AnalysisReport, DefragPolicy, MountState, PhysicalRange, PlanId, ServiceEvent,
-    SupportStatus, Volume, VolumeId,
+    AnalysisId, AnalysisReport, DefragPolicy, MountState, OptimizationMode, PhysicalRange, PlanId,
+    ServiceEvent, SupportStatus, Volume, VolumeId,
 };
 #[cfg(all(feature = "development-service", not(feature = "system-helper")))]
 use defrag_service::DevelopmentClient;
@@ -39,7 +39,11 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut arguments = env::args().skip(1).collect::<Vec<_>>();
     let direct = take_flag(&mut arguments, "--direct");
-    let command = arguments.first().map(String::as_str).unwrap_or("help");
+    let command = arguments
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "help".to_owned());
+    let command = command.as_str();
     if matches!(command, "help" | "-h" | "--help") {
         usage();
         return Ok(());
@@ -54,21 +58,29 @@ fn run() -> Result<(), String> {
             print_report("ANALYSIS", &report);
             Ok(())
         }
-        "defrag" => {
+        "defrag" | "compact" => {
+            let mode = if command == "compact" {
+                OptimizationMode::Compact
+            } else {
+                OptimizationMode::Defragment
+            };
             let confirmed = take_flag(&mut arguments, "--yes");
             let require_fully_defragmented =
                 take_flag(&mut arguments, "--require-fully-defragmented");
             let legacy_require_zero = take_flag(&mut arguments, "--require-zero-excess");
             if arguments.len() != 2 {
-                return Err("defrag expects a device or mount path".into());
+                return Err(format!("{command} expects a device or mount path"));
             }
             if !confirmed {
-                return Err("defrag modifies the filesystem; pass --yes to confirm".into());
+                return Err(format!(
+                    "{command} modifies the filesystem; pass --yes to confirm"
+                ));
             }
             defrag(
                 &client,
                 resolve_volume_id(&client, &arguments[1])?,
                 require_fully_defragmented || legacy_require_zero,
+                mode,
             )
         }
         _ => Err("invalid command; run defragger-cli --help".into()),
@@ -77,7 +89,7 @@ fn run() -> Result<(), String> {
 
 fn usage() {
     println!(
-        "Usage:\n  defragger-cli [--direct] list\n  defragger-cli [--direct] analyze DEVICE_OR_MOUNT\n  defragger-cli [--direct] defrag DEVICE_OR_MOUNT --yes [--require-fully-defragmented]\n\nDEVICE_OR_MOUNT may be a device path, mount point, /dev/disk symlink, or loop backing-image path."
+        "Usage:\n  defragger-cli [--direct] list\n  defragger-cli [--direct] analyze DEVICE_OR_MOUNT\n  defragger-cli [--direct] defrag DEVICE_OR_MOUNT --yes [--require-fully-defragmented]\n  defragger-cli [--direct] compact DEVICE_OR_MOUNT --yes [--require-fully-defragmented]\n\nDefrag rewrites fragmented files only when a free contiguous destination exists. Compact packs movable FAT16/32 files toward low cluster addresses and can perform supporting moves.\n\nDEVICE_OR_MOUNT may be a device path, mount point, /dev/disk symlink, or loop backing-image path."
     );
 }
 
@@ -159,10 +171,21 @@ fn analyze(client: &Client, volume_id: VolumeId) -> Result<(AnalysisId, Analysis
     }
 }
 
-fn defrag(client: &Client, volume_id: VolumeId, require_zero: bool) -> Result<(), String> {
+fn defrag(
+    client: &Client,
+    volume_id: VolumeId,
+    require_zero: bool,
+    mode: OptimizationMode,
+) -> Result<(), String> {
     let (analysis_id, before) = analyze(client, volume_id)?;
     print_report("BEFORE", &before);
-    let (plan_id, plan) = client.build_plan(analysis_id, &DefragPolicy::default())?;
+    let (plan_id, plan) = client.build_plan(
+        analysis_id,
+        &DefragPolicy {
+            mode,
+            ..DefragPolicy::default()
+        },
+    )?;
     println!(
         "PLAN candidates={} bytes={} excluded={}",
         plan.candidates.len(),
