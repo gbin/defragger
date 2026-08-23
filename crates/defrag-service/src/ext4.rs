@@ -182,12 +182,15 @@ impl FilesystemBackend for Ext4Backend {
                 files.push(report);
 
                 if coverage.files_scanned % 128 == 0
-                    && last_ui_update.elapsed() >= Duration::from_millis(100)
+                    || last_ui_update.elapsed() >= Duration::from_millis(100)
                 {
                     for (physical, length, fragmented) in scanned_ranges.drain(..) {
                         bins.mark_scanned(physical, length, fragmented);
                     }
-                    events.map_updated(false, bins.take_changes());
+                    let changes = bins.take_changes();
+                    if !changes.is_empty() {
+                        events.map_updated(false, changes);
+                    }
                     events.progress(progress(
                         job_id,
                         AnalysisPhase::WalkingFiles,
@@ -210,7 +213,10 @@ impl FilesystemBackend for Ext4Backend {
         for (physical, length, fragmented) in scanned_ranges {
             bins.mark_scanned(physical, length, fragmented);
         }
-        events.map_updated(false, bins.take_changes());
+        let changes = bins.take_changes();
+        if !changes.is_empty() {
+            events.map_updated(false, changes);
+        }
         files.sort_by(|left, right| {
             right
                 .excess_runs

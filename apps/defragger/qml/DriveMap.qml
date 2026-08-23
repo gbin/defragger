@@ -6,6 +6,7 @@ Item {
     id: root
 
     property var mapData
+    property string volumeId: ""
     property double capacityBytes: 0
     property bool useAnalysis: false
     property int sourceRevision: 0
@@ -226,6 +227,15 @@ Item {
         hoveredIndex = -1
         requestRebuild(false)
     }
+    onVolumeIdChanged: {
+        // Selection is part of the map identity. Drop the previous volume's
+        // pixels immediately, then publish a map for the new selection.
+        hoveredIndex = -1
+        mapView = null
+        binCount = 0
+        geometryPending = true
+        requestRebuild(false)
+    }
     onCapacityBytesChanged: {
         hoveredIndex = -1
         requestRebuild(true)
@@ -239,18 +249,25 @@ Item {
         if (renderedGeneration !== rebuildGeneration)
             return
         workerBusy = false
-        if (rebuildPending) {
-            if (!resizeDebounce.running)
-                dispatchRebuild()
-            return
-        }
         try {
             mapView = new DataView(mapData)
             binCount = Math.floor(mapView.byteLength / recordBytes)
+            // A live map update normally preserves the tile count. Canvas is
+            // imperative, so replacing its data buffer does not schedule a
+            // repaint by itself.
+            canvas.requestPaint()
         } catch (error) {
             console.warn("Could not read drive map buffer:", error)
             mapView = null
             binCount = 0
+        }
+        // Publish every completed frame before starting the next one. During
+        // a scan, updates can arrive faster than aggregation; skipping here
+        // would otherwise starve the canvas until analysis finishes.
+        if (rebuildPending) {
+            if (!resizeDebounce.running)
+                dispatchRebuild()
+            return
         }
         geometryPending = false
     }

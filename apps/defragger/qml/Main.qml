@@ -18,6 +18,12 @@ Kirigami.ApplicationWindow {
         && selectedIndex < controller.volume_count
     readonly property string selectedVolumeId: hasSelectedVolume
         ? String(controller.volume_id(selectedIndex)) : ""
+    readonly property bool selectedHasReport: hasSelectedVolume
+        && controller.has_report
+        && selectedVolumeId === String(controller.report_volume_id)
+    readonly property bool selectedIsBeingAnalyzed: hasSelectedVolume
+        && controller.busy
+        && selectedVolumeId === String(controller.map_volume_id)
     function bytes(value) {
         if (!value) return "0 B"
         const units = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -133,11 +139,11 @@ Kirigami.ApplicationWindow {
                             }
                             Controls.Label {
                                 text: controller.has_report
-                                    && controller.report_volume_id === volumeId
+                                    && String(controller.report_volume_id) === volumeId
                                     ? window.percent(controller.fragmented_basis_points) : "—"
                                 Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight
                             }
-                            Controls.Label { text: controller.busy && window.selectedIndex === index ? qsTr("Analyzing…") : (controller.volume_supported(index) ? qsTr("Analyze") : qsTr("Unsupported")); Layout.fillWidth: true }
+                            Controls.Label { text: controller.busy && String(controller.map_volume_id) === volumeId ? qsTr("Analyzing…") : (controller.volume_supported(index) ? qsTr("Analyze") : qsTr("Unsupported")); Layout.fillWidth: true }
                         }
                         MouseArea { anchors.fill: parent; onClicked: window.selectedIndex = index; onDoubleClicked: window.analyzeSelected() }
                     }
@@ -152,6 +158,7 @@ Kirigami.ApplicationWindow {
             Layout.minimumHeight: 100
             capacityBytes: window.hasSelectedVolume
                 ? controller.volume_capacity_bytes(window.selectedIndex) : 0
+            volumeId: window.selectedVolumeId
             useAnalysis: window.hasSelectedVolume
                 && window.selectedVolumeId === String(controller.map_volume_id)
             sourceRevision: useAnalysis ? controller.map_revision : 0
@@ -180,19 +187,19 @@ Kirigami.ApplicationWindow {
                 color: Kirigami.Theme.backgroundColor; border.color: Kirigami.Theme.disabledTextColor; border.width: 1
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: Kirigami.Units.largeSpacing
-                    Controls.Label { text: controller.busy ? qsTr("Analysis in progress") : (controller.has_report ? qsTr("Analysis complete") : qsTr("Ready")); font.bold: true }
+                    Controls.Label { text: window.selectedIsBeingAnalyzed ? qsTr("Analysis in progress") : (window.selectedHasReport ? qsTr("Analysis complete") : qsTr("Ready")); font.bold: true }
                     Controls.Label {
-                        visible: text.length > 0
-                        text: controller.status
+                        visible: window.selectedIsBeingAnalyzed && text.length > 0
+                        text: window.selectedIsBeingAnalyzed ? controller.status : ""
                         elide: Text.ElideMiddle
                         Layout.fillWidth: true
                     }
                     RowLayout {
-                        Controls.Label { text: qsTr("Files scanned: %1").arg(Math.floor(controller.files_scanned).toLocaleString()) }
-                        Controls.Label { text: qsTr("Allocated data scanned: %1").arg(window.bytes(controller.bytes_scanned)) }
-                        Controls.Label { visible: controller.has_report; text: qsTr("Coverage: %1 · %2 skipped").arg(window.percent(controller.coverage_basis_points)).arg(Math.floor(controller.skipped_entries).toLocaleString()) }
+                        Controls.Label { text: qsTr("Files scanned: %1").arg(window.selectedHasReport || window.selectedIsBeingAnalyzed ? Math.floor(controller.files_scanned).toLocaleString() : "0") }
+                        Controls.Label { text: qsTr("Allocated data scanned: %1").arg(window.bytes(window.selectedHasReport || window.selectedIsBeingAnalyzed ? controller.bytes_scanned : 0)) }
+                        Controls.Label { visible: window.selectedHasReport; text: qsTr("Coverage: %1 · %2 skipped").arg(window.percent(controller.coverage_basis_points)).arg(Math.floor(controller.skipped_entries).toLocaleString()) }
                         Item { Layout.fillWidth: true }
-                        Controls.Label { text: controller.has_report ? qsTr("Fragmented scanned data: %1").arg(window.percent(controller.fragmented_basis_points)) : qsTr("Fragmentation: not analyzed") }
+                        Controls.Label { text: window.selectedHasReport ? qsTr("Fragmented scanned data: %1").arg(window.percent(controller.fragmented_basis_points)) : qsTr("Fragmentation: not analyzed") }
                     }
                 }
             }
@@ -200,7 +207,7 @@ Kirigami.ApplicationWindow {
             ListView {
                 id: fileList
                 clip: true
-                model: controller.file_row_count
+                model: window.selectedHasReport ? controller.file_row_count : 0
                 delegate: Controls.ItemDelegate {
                     required property int index
                     width: ListView.view.width
@@ -216,7 +223,7 @@ Kirigami.ApplicationWindow {
         RowLayout {
             Layout.fillWidth: true
             Controls.Button { text: qsTr("Analyze"); icon.name: "system-search"; enabled: window.selectedIndex >= 0 && !controller.busy; onClicked: window.analyzeSelected() }
-            Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && controller.has_report; onClicked: controller.build_plan() }
+            Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && window.selectedHasReport; onClicked: controller.build_plan() }
             Item { Layout.preferredWidth: Kirigami.Units.largeSpacing }
             Controls.Button { text: controller.paused ? qsTr("Resume") : qsTr("Pause"); enabled: controller.busy; onClicked: controller.paused ? controller.resume() : controller.pause() }
             Controls.Button { text: qsTr("Stop"); icon.name: "process-stop"; enabled: controller.busy; onClicked: controller.stop() }
