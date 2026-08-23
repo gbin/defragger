@@ -24,10 +24,10 @@ then exits, and systemd's `--collect` removes the stopped transient unit.
 
 The GUI obtains the volume list from an unprivileged helper method so that the
 mount IDs come from the helper's hardened mount namespace. When the user
-presses Analyze, it calls `io.github.defragger.Helper1.StartAnalysis` on the
+presses Analyze, it calls `net.gootz.defragger.Helper1.StartAnalysis` on the
 system bus with the interactive-authentication flag. The root-owned helper asks
 PolicyKit to check the calling connection for
-`io.github.defragger.read-all-files`; the desktop's PolicyKit agent owns all
+`net.gootz.defragger.read-all-files`; the desktop's PolicyKit agent owns all
 password UI. Jobs and completed analyses are bound to that unique D-Bus caller,
 and every later operation verifies the owner. A client can own only one active
 job, abandoned jobs are cancelled, and unused completed analyses expire.

@@ -10,9 +10,9 @@ use defrag_domain::{AnalysisId, DefragPolicy, ServiceEvent, VolumeId};
 use defrag_service::{InProcessClient, JobHandle};
 use zbus::{Connection, connection::Builder, fdo, interface, message::Header, zvariant::Value};
 
-const BUS_NAME: &str = "io.github.defragger.Helper";
-const OBJECT_PATH: &str = "/io/github/defragger/Helper";
-const ACTION_READ_ALL: &str = "io.github.defragger.read-all-files";
+const BUS_NAME: &str = "net.gootz.defragger.Helper";
+const OBJECT_PATH: &str = "/net/gootz/defragger/Helper";
+const ACTION_READ_ALL: &str = "net.gootz.defragger.read-all-files";
 
 struct JobEntry {
     owner: String,
@@ -50,7 +50,7 @@ impl Default for Helper {
     }
 }
 
-#[interface(name = "io.github.defragger.Helper1")]
+#[interface(name = "net.gootz.defragger.Helper1")]
 impl Helper {
     async fn list_volumes(&self) -> fdo::Result<String> {
         let client = self.client.clone();

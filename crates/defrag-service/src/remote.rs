@@ -24,9 +24,9 @@ use zbus::{
     proxy::MethodFlags,
 };
 
-pub const BUS_NAME: &str = "io.github.defragger.Helper";
-pub const OBJECT_PATH: &str = "/io/github/defragger/Helper";
-pub const INTERFACE: &str = "io.github.defragger.Helper1";
+pub const BUS_NAME: &str = "net.gootz.defragger.Helper";
+pub const OBJECT_PATH: &str = "/net/gootz/defragger/Helper";
+pub const INTERFACE: &str = "net.gootz.defragger.Helper1";
 
 #[derive(Debug, Error)]
 pub enum PrivilegedClientError {
@@ -338,7 +338,7 @@ mod tests {
 
     struct EmptyHelper;
 
-    #[interface(name = "io.github.defragger.Helper1")]
+    #[interface(name = "net.gootz.defragger.Helper1")]
     impl EmptyHelper {
         fn list_volumes(&self) -> String {
             "[]".into()

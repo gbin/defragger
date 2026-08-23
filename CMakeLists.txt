@@ -23,8 +23,8 @@ add_custom_target(defragger-helper ALL
 )
 
 configure_file(
-    packaging/io.github.defragger.Helper.service.in
-    "${CMAKE_CURRENT_BINARY_DIR}/io.github.defragger.Helper.service"
+    packaging/net.gootz.defragger.Helper.service.in
+    "${CMAKE_CURRENT_BINARY_DIR}/net.gootz.defragger.Helper.service"
     @ONLY
 )
 configure_file(
@@ -37,15 +37,17 @@ install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/target/release/defragger"
     DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/target/release/defragger-helper"
     DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}")
-install(FILES packaging/io.github.defragger.desktop
+install(FILES packaging/net.gootz.defragger.desktop
     DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
-install(FILES packaging/io.github.defragger.metainfo.xml
+install(FILES packaging/net.gootz.defragger.metainfo.xml
     DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo")
-install(FILES packaging/io.github.defragger.policy
+install(FILES packaging/net.gootz.defragger.svg
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps")
+install(FILES packaging/net.gootz.defragger.policy
     DESTINATION "${CMAKE_INSTALL_DATADIR}/polkit-1/actions")
-install(FILES packaging/io.github.defragger.Helper.conf
+install(FILES packaging/net.gootz.defragger.Helper.conf
     DESTINATION "${CMAKE_INSTALL_DATADIR}/dbus-1/system.d")
-install(FILES "${CMAKE_CURRENT_BINARY_DIR}/io.github.defragger.Helper.service"
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/net.gootz.defragger.Helper.service"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/dbus-1/system-services")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/defragger-helper.service"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/system")

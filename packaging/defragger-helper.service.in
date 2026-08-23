@@ -3,7 +3,7 @@ Description=Defragger privileged read-only analysis helper
 
 [Service]
 Type=dbus
-BusName=io.github.defragger.Helper
+BusName=net.gootz.defragger.Helper
 ExecStart=@CMAKE_INSTALL_FULL_LIBEXECDIR@/defragger-helper
 User=root
 NoNewPrivileges=yes

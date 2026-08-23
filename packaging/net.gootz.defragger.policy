@@ -4,10 +4,9 @@
  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
 <policyconfig>
   <vendor>Defragger</vendor>
-  <vendor_url>https://github.com/gbin/defragger</vendor_url>
-  <icon_name>drive-harddisk</icon_name>
+  <icon_name>net.gootz.defragger</icon_name>
 
-  <action id="io.github.defragger.read-all-files">
+  <action id="net.gootz.defragger.read-all-files">
     <description>Analyze all files on a disk</description>
     <message>Authentication is required to inspect all files on disks</message>
     <defaults>

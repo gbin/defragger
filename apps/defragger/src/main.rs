@@ -1,6 +1,7 @@
+mod application_icon;
 mod controller;
 
-use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
+use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
 
 fn main() {
     #[cfg(feature = "development-service")]
@@ -13,9 +14,11 @@ fn main() {
     }
 
     let mut app = QGuiApplication::new();
+    QGuiApplication::set_desktop_file_name(&QString::from("net.gootz.defragger"));
+    application_icon::set_application_icon();
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {
-        engine.load(&QUrl::from("qrc:/qt/qml/io/github/defragger/qml/Main.qml"));
+        engine.load(&QUrl::from("qrc:/qt/qml/net/gootz/defragger/qml/Main.qml"));
     }
     if let Some(app) = app.as_mut() {
         app.exec();

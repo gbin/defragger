@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.defragger</id>
+  <id>net.gootz.defragger</id>
   <name>Defragger</name>
   <summary>Analyze ext4 fragmentation on Linux</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -8,7 +8,7 @@
   <description>
     <p>Defragger visualizes ext4 allocation and file fragmentation using direct Linux kernel APIs. Version 0 is read-only and can preview, but cannot execute, a defragmentation plan.</p>
   </description>
-  <launchable type="desktop-id">io.github.defragger.desktop</launchable>
+  <launchable type="desktop-id">net.gootz.defragger.desktop</launchable>
   <provides><binary>defragger</binary></provides>
   <categories><category>System</category></categories>
 </component>

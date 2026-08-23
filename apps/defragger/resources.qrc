@@ -1,0 +1,6 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/icons">
+    <file alias="net.gootz.defragger.svg">../../packaging/net.gootz.defragger.svg</file>
+  </qresource>
+</RCC>
