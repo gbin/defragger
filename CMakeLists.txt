@@ -22,6 +22,13 @@ add_custom_target(defragger-helper ALL
     VERBATIM
 )
 
+add_custom_target(defragger-cli ALL
+    COMMAND "${CARGO_EXECUTABLE}" build --release --package defragger-cli --no-default-features --features system-helper
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Building the command-line client"
+    VERBATIM
+)
+
 configure_file(
     packaging/net.gootz.defragger.Helper.service.in
     "${CMAKE_CURRENT_BINARY_DIR}/net.gootz.defragger.Helper.service"
@@ -37,6 +44,8 @@ install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/target/release/defragger"
     DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/target/release/defragger-helper"
     DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}")
+install(PROGRAMS "${CMAKE_CURRENT_SOURCE_DIR}/target/release/defragger-cli"
+    DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES packaging/net.gootz.defragger.desktop
     DESTINATION "${CMAKE_INSTALL_DATADIR}/applications")
 install(FILES packaging/net.gootz.defragger.metainfo.xml

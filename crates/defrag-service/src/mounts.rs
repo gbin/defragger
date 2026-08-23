@@ -1,6 +1,13 @@
-use std::{ffi::CString, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    ffi::CString,
+    fs, io,
+    os::unix::fs::{FileExt, FileTypeExt, MetadataExt},
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
-use defrag_domain::{SupportStatus, Volume, VolumeId};
+use defrag_domain::{MountState, SupportStatus, Volume, VolumeId};
 
 use crate::{FilesystemBackend, ServiceError};
 
@@ -10,6 +17,7 @@ struct MountInfo {
     parent_mount_id: u64,
     major: u32,
     minor: u32,
+    root: PathBuf,
     mount_point: PathBuf,
     options: Vec<String>,
     filesystem: String,
@@ -19,28 +27,77 @@ struct MountInfo {
 pub fn discover(
     backends: &[std::sync::Arc<dyn FilesystemBackend>],
 ) -> Result<Vec<Volume>, ServiceError> {
-    let contents = fs::read_to_string("/proc/self/mountinfo")?;
+    let mounts: Vec<_> = fs::read_to_string("/proc/self/mountinfo")?
+        .lines()
+        .filter_map(parse_line)
+        .filter(is_interesting)
+        .collect();
+    let mut devices = block_devices();
+    for info in &mounts {
+        devices
+            .entry((info.major, info.minor))
+            .or_insert_with(|| DeviceInfo {
+                source: info.source.clone(),
+                filesystem: info.filesystem.clone(),
+                capacity: 0,
+                label: None,
+                uuid: None,
+            });
+    }
+
     let mut volumes = Vec::new();
-    for line in contents.lines() {
-        let Some(info) = parse_line(line) else {
-            continue;
-        };
-        if !is_interesting(&info) {
+    for ((major, minor), device) in devices {
+        let mounted = mounts
+            .iter()
+            .filter(|mount| mount.major == major && mount.minor == minor)
+            .min_by_key(|mount| {
+                (
+                    mount.root.as_path() != std::path::Path::new("/"),
+                    mount.mount_point.clone(),
+                )
+            });
+        let (mount_id, parent_mount_id, mount_point, source, filesystem, read_only) =
+            if let Some(info) = mounted {
+                (
+                    Some(info.mount_id),
+                    Some(info.parent_mount_id),
+                    Some(info.mount_point.clone()),
+                    info.source.clone(),
+                    info.filesystem.clone(),
+                    info.options.iter().any(|option| option == "ro"),
+                )
+            } else {
+                (None, None, None, device.source, device.filesystem, false)
+            };
+        if filesystem.is_empty() {
             continue;
         }
-        let (capacity, free) = statvfs(&info.mount_point).unwrap_or((0, 0));
+        let (capacity, free) = mount_point
+            .as_deref()
+            .and_then(statvfs)
+            .map_or((device.capacity, None), |(capacity, free)| {
+                (capacity, Some(free))
+            });
+        let mount_state = match (mount_point.is_some(), read_only) {
+            (false, _) => MountState::Unmounted,
+            (true, true) => MountState::MountedReadOnly,
+            (true, false) => MountState::MountedReadWrite,
+        };
         let mut volume = Volume {
-            id: VolumeId(info.mount_id),
-            mount_id: info.mount_id,
-            parent_mount_id: info.parent_mount_id,
-            device_major: info.major,
-            device_minor: info.minor,
-            mount_point: info.mount_point,
-            source: info.source,
-            filesystem: info.filesystem,
-            read_only: info.options.iter().any(|option| option == "ro"),
+            id: device_volume_id(major, minor),
+            mount_id,
+            parent_mount_id,
+            device_major: major,
+            device_minor: minor,
+            mount_point,
+            source,
+            filesystem,
+            label: device.label,
+            uuid: device.uuid,
+            mount_state,
+            read_only,
             capacity_bytes: capacity,
-            used_bytes: capacity.saturating_sub(free),
+            used_bytes: free.map(|free| capacity.saturating_sub(free)),
             free_bytes: free,
             support: SupportStatus::Unsupported {
                 reason: "No filesystem backend is installed".into(),
@@ -48,15 +105,92 @@ pub fn discover(
         };
         for backend in backends {
             let support = backend.probe(&volume);
-            if matches!(support, SupportStatus::ReadOnly) {
+            if matches!(
+                support,
+                SupportStatus::ReadOnly | SupportStatus::Defragmentable
+            ) {
                 volume.support = support;
                 break;
             }
         }
         volumes.push(volume);
     }
-    volumes.sort_by(|a, b| a.mount_point.cmp(&b.mount_point));
+    volumes.sort_by(|a, b| a.source.cmp(&b.source));
     Ok(volumes)
+}
+
+#[derive(Debug)]
+struct DeviceInfo {
+    source: String,
+    filesystem: String,
+    capacity: u64,
+    label: Option<String>,
+    uuid: Option<String>,
+}
+
+fn block_devices() -> BTreeMap<(u32, u32), DeviceInfo> {
+    let mut devices = BTreeMap::new();
+    let Ok(entries) = fs::read_dir("/sys/class/block") else {
+        return devices;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let Some((major, minor)) = fs::read_to_string(path.join("dev"))
+            .ok()
+            .and_then(|value| parse_device_number(value.trim()))
+        else {
+            continue;
+        };
+        let properties = udev_properties(major, minor);
+        if properties
+            .get("ID_FS_USAGE")
+            .is_none_or(|usage| usage != "filesystem")
+        {
+            continue;
+        }
+        let Some(filesystem) = properties.get("ID_FS_TYPE").cloned() else {
+            continue;
+        };
+        let sectors = fs::read_to_string(path.join("size"))
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        devices.insert(
+            (major, minor),
+            DeviceInfo {
+                source: format!("/dev/{name}"),
+                filesystem,
+                capacity: sectors.saturating_mul(512),
+                label: properties.get("ID_FS_LABEL").cloned(),
+                uuid: properties.get("ID_FS_UUID").cloned(),
+            },
+        );
+    }
+    devices
+}
+
+fn udev_properties(major: u32, minor: u32) -> BTreeMap<String, String> {
+    let path = format!("/run/udev/data/b{major}:{minor}");
+    fs::read_to_string(path)
+        .ok()
+        .into_iter()
+        .flat_map(|contents| contents.lines().map(str::to_owned).collect::<Vec<_>>())
+        .filter_map(|line| {
+            line.strip_prefix("E:")?
+                .split_once('=')
+                .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        })
+        .collect()
+}
+
+fn parse_device_number(value: &str) -> Option<(u32, u32)> {
+    let (major, minor) = value.split_once(':')?;
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+fn device_volume_id(major: u32, minor: u32) -> VolumeId {
+    VolumeId((u64::from(major) << 32) | u64::from(minor))
 }
 
 fn is_interesting(info: &MountInfo) -> bool {
@@ -95,7 +229,7 @@ fn parse_line(line: &str) -> Option<MountInfo> {
     let (major, minor) = left_fields.next()?.split_once(':')?;
     let major = major.parse().ok()?;
     let minor = minor.parse().ok()?;
-    let _root = left_fields.next()?;
+    let root = PathBuf::from(unescape(left_fields.next()?));
     let mount_point = PathBuf::from(unescape(left_fields.next()?));
     let options = left_fields.next()?.split(',').map(str::to_owned).collect();
 
@@ -107,6 +241,7 @@ fn parse_line(line: &str) -> Option<MountInfo> {
         parent_mount_id,
         major,
         minor,
+        root,
         mount_point,
         options,
         filesystem,
@@ -148,6 +283,203 @@ fn statvfs(path: &std::path::Path) -> Option<(u64, u64)> {
     ))
 }
 
+static NEXT_PRIVATE_MOUNT: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) struct JobMount {
+    pub(crate) volume: Volume,
+    temporary_path: Option<PathBuf>,
+}
+
+impl Drop for JobMount {
+    fn drop(&mut self) {
+        let Some(path) = self.temporary_path.take() else {
+            return;
+        };
+        if let Ok(path_c) = CString::new(path.as_os_str().as_encoded_bytes()) {
+            // SAFETY: path_c is a valid NUL-terminated mount point. MNT_DETACH
+            // guarantees cleanup even if a failed job left an fd open.
+            unsafe { libc::umount2(path_c.as_ptr(), libc::MNT_DETACH) };
+        }
+        let _ = fs::remove_dir(path);
+    }
+}
+
+pub(crate) fn mount_for_job(volume: &Volume, writable: bool) -> Result<JobMount, ServiceError> {
+    if volume.mount_state != MountState::Unmounted {
+        if writable && volume.mount_state != MountState::MountedReadWrite {
+            return Err(ServiceError::Io(std::io::Error::new(
+                std::io::ErrorKind::ReadOnlyFilesystem,
+                "the selected filesystem is mounted read-only",
+            )));
+        }
+        return Ok(JobMount {
+            volume: volume.clone(),
+            temporary_path: None,
+        });
+    }
+
+    validate_block_device(volume)?;
+    if !writable && volume.filesystem == "ext4" {
+        validate_ext4_clean(volume)?;
+    }
+    // SAFETY: this job already runs on its own worker thread. A new mount
+    // namespace prevents the temporary mount from appearing in the desktop.
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } < 0 {
+        return Err(operation_error(
+            "could not create the job's private mount namespace",
+            io::Error::last_os_error(),
+        ));
+    }
+    let root = CString::new("/").expect("literal contains no NUL");
+    // SAFETY: a null source/fstype is required for propagation-only mounts.
+    if unsafe {
+        libc::mount(
+            std::ptr::null(),
+            root.as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+            std::ptr::null(),
+        )
+    } < 0
+    {
+        return Err(operation_error(
+            "could not make mounts private inside the job namespace",
+            io::Error::last_os_error(),
+        ));
+    }
+
+    let serial = NEXT_PRIVATE_MOUNT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "defragger-{}-{}-{serial}",
+        std::process::id(),
+        volume.id.0
+    ));
+    fs::create_dir(&path).map_err(|error| {
+        operation_error(
+            &format!("could not create private mount point {}", path.display()),
+            error,
+        )
+    })?;
+    let cstring = |bytes: &[u8]| {
+        CString::new(bytes).map_err(|error| {
+            ServiceError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        })
+    };
+    let source = cstring(volume.source.as_bytes())?;
+    let target = cstring(path.as_os_str().as_encoded_bytes())?;
+    let filesystem = cstring(volume.filesystem.as_bytes())?;
+    // nodev/nosuid/noexec are VFS flags, not filesystem option text. Passing
+    // them in `data` makes ext4's option parser reject the mount with EINVAL.
+    let options = (!writable && volume.filesystem == "ext4")
+        .then(|| cstring(b"noload"))
+        .transpose()?;
+    let options_pointer = options
+        .as_ref()
+        .map_or(std::ptr::null(), |options| options.as_ptr().cast());
+    let flags = libc::MS_NODEV
+        | libc::MS_NOSUID
+        | libc::MS_NOEXEC
+        | if writable { 0 } else { libc::MS_RDONLY };
+    // SAFETY: all strings are NUL terminated; mount validates the device and
+    // filesystem before making it visible inside this namespace.
+    if unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            filesystem.as_ptr(),
+            flags as libc::c_ulong,
+            options_pointer,
+        )
+    } < 0
+    {
+        let error = io::Error::last_os_error();
+        let _ = fs::remove_dir(&path);
+        return Err(operation_error(
+            &format!(
+                "could not mount {} as {} {} at {}",
+                volume.source,
+                volume.filesystem,
+                if writable { "read-write" } else { "read-only" },
+                path.display()
+            ),
+            error,
+        ));
+    }
+
+    let mut mounted = JobMount {
+        volume: volume.clone(),
+        temporary_path: Some(path.clone()),
+    };
+    mounted.volume.mount_point = Some(path.clone());
+    mounted.volume.mount_id = Some(crate::linux::mount_id(&path).map_err(|error| {
+        operation_error(
+            &format!("could not identify private mount {}", path.display()),
+            error,
+        )
+    })?);
+    mounted.volume.parent_mount_id = None;
+    mounted.volume.read_only = !writable;
+    if let Some((capacity, free)) = statvfs(&path) {
+        mounted.volume.capacity_bytes = capacity;
+        mounted.volume.free_bytes = Some(free);
+        mounted.volume.used_bytes = Some(capacity.saturating_sub(free));
+    }
+    Ok(mounted)
+}
+
+fn operation_error(operation: &str, error: io::Error) -> ServiceError {
+    ServiceError::Io(io::Error::new(
+        error.kind(),
+        format!("{operation}: {error}"),
+    ))
+}
+
+fn validate_block_device(volume: &Volume) -> Result<(), ServiceError> {
+    let metadata = fs::metadata(&volume.source)?;
+    if !metadata.file_type().is_block_device()
+        || libc::major(metadata.rdev()) != volume.device_major
+        || libc::minor(metadata.rdev()) != volume.device_minor
+    {
+        return Err(ServiceError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the selected block device no longer matches the discovered volume",
+        )));
+    }
+    Ok(())
+}
+
+fn validate_ext4_clean(volume: &Volume) -> Result<(), ServiceError> {
+    const EXT4_SUPER_OFFSET: u64 = 1024;
+    const EXT4_MAGIC_OFFSET: usize = 0x38;
+    const EXT4_FEATURE_INCOMPAT_OFFSET: usize = 0x60;
+    const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
+    let file = fs::File::open(&volume.source)?;
+    let mut superblock = [0u8; 1024];
+    file.read_exact_at(&mut superblock, EXT4_SUPER_OFFSET)?;
+    let magic = u16::from_le_bytes([
+        superblock[EXT4_MAGIC_OFFSET],
+        superblock[EXT4_MAGIC_OFFSET + 1],
+    ]);
+    let incompat = u32::from_le_bytes(
+        superblock[EXT4_FEATURE_INCOMPAT_OFFSET..EXT4_FEATURE_INCOMPAT_OFFSET + 4]
+            .try_into()
+            .expect("fixed-size slice"),
+    );
+    if magic != 0xef53 {
+        return Err(ServiceError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the selected device no longer contains ext4",
+        )));
+    }
+    if incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0 {
+        return Err(ServiceError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ext4 journal recovery is required; authorize defragmentation or mount the volume normally first",
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +492,11 @@ mod tests {
         assert_eq!(info.mount_point, PathBuf::from("/media/My Disk"));
         assert_eq!(info.filesystem, "ext4");
         assert_eq!(info.source, "/dev/sda2");
+        assert_eq!(info.root, PathBuf::from("/"));
+    }
+
+    #[test]
+    fn volume_ids_are_device_based() {
+        assert_eq!(device_volume_id(8, 2), VolumeId((8_u64 << 32) | 2));
     }
 }

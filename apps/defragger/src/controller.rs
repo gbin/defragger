@@ -14,6 +14,7 @@ mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(QByteArray, display_map_data)]
+        #[qproperty(QByteArray, activity_data)]
         #[qproperty(QString, status)]
         #[qproperty(QString, map_volume_id)]
         #[qproperty(QString, report_volume_id)]
@@ -22,6 +23,7 @@ mod qobject {
         #[qproperty(i32, map_revision)]
         #[qproperty(i32, analysis_revision)]
         #[qproperty(i32, display_map_generation)]
+        #[qproperty(i32, activity_revision)]
         #[qproperty(i32, fragmented_basis_points)]
         #[qproperty(i32, coverage_basis_points)]
         #[qproperty(i32, file_row_count)]
@@ -50,6 +52,8 @@ mod qobject {
         fn stop(self: Pin<&mut Controller>);
         #[qinvokable]
         fn build_plan(self: Pin<&mut Controller>);
+        #[qinvokable]
+        fn start_defrag(self: Pin<&mut Controller>);
         #[qinvokable]
         fn volume_id(self: &Controller, index: i32) -> QString;
         #[qinvokable]
@@ -112,7 +116,7 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QString};
 use defrag_domain::{
     AnalysisId, AnalysisReport, CategoryMix, DefragPolicy, FileReport, MapBin, MetadataMix,
-    PhysicalRange, PlanCandidate, ServiceEvent, SupportStatus, Volume, VolumeId,
+    PhysicalRange, PlanCandidate, PlanId, ServiceEvent, SupportStatus, Volume, VolumeId,
 };
 #[cfg(all(feature = "development-service", not(feature = "system-helper")))]
 use defrag_service::DevelopmentClient as AppClient;
@@ -121,7 +125,7 @@ use defrag_service::InProcessClient as AppClient;
 #[cfg(feature = "system-helper")]
 use defrag_service::PrivilegedClient as AppClient;
 
-const MAP_CATEGORY_BYTES: usize = 42;
+const MAP_CATEGORY_BYTES: usize = 44;
 const MAP_CONTRIBUTOR_BYTES: usize = 6;
 const MAX_MAP_CONTRIBUTORS: usize = 5;
 const MAP_RECORD_BYTES: usize = MAP_CATEGORY_BYTES + MAP_CONTRIBUTOR_BYTES * MAX_MAP_CONTRIBUTORS;
@@ -167,6 +171,14 @@ enum UiUpdate {
         analysis_id: AnalysisId,
         report: UiReport,
     },
+    Activity {
+        reading: Vec<PhysicalRange>,
+        writing: Vec<PhysicalRange>,
+    },
+    DefragFinished {
+        report: UiReport,
+        stopped: bool,
+    },
     Cancelled,
     Failed(String),
 }
@@ -186,7 +198,7 @@ struct UiReport {
 
 #[derive(Clone)]
 struct CachedAnalysis {
-    analysis_id: AnalysisId,
+    analysis_id: Option<AnalysisId>,
     fragmented_basis_points: i32,
     coverage_basis_points: i32,
     files_scanned: f64,
@@ -201,6 +213,7 @@ struct CachedAnalysis {
 
 pub struct ControllerRust {
     display_map_data: QByteArray,
+    activity_data: QByteArray,
     status: QString,
     map_volume_id: QString,
     report_volume_id: QString,
@@ -209,6 +222,7 @@ pub struct ControllerRust {
     map_revision: i32,
     analysis_revision: i32,
     display_map_generation: i32,
+    activity_revision: i32,
     fragmented_basis_points: i32,
     coverage_basis_points: i32,
     file_row_count: i32,
@@ -224,6 +238,7 @@ pub struct ControllerRust {
     client: Option<AppClient>,
     worker: Option<Sender<WorkerCommand>>,
     analysis_id: Option<AnalysisId>,
+    plan_id: Option<PlanId>,
     visible_volume_id: Option<VolumeId>,
     active_volume_id: Option<VolumeId>,
     active_map_bins: Vec<MapBin>,
@@ -243,6 +258,7 @@ impl Default for ControllerRust {
     fn default() -> Self {
         Self {
             display_map_data: QByteArray::default(),
+            activity_data: QByteArray::default(),
             status: QString::default(),
             map_volume_id: QString::default(),
             report_volume_id: QString::default(),
@@ -251,6 +267,7 @@ impl Default for ControllerRust {
             map_revision: 0,
             analysis_revision: 0,
             display_map_generation: 0,
+            activity_revision: 0,
             fragmented_basis_points: -1,
             coverage_basis_points: -1,
             file_row_count: 0,
@@ -266,6 +283,7 @@ impl Default for ControllerRust {
             client: None,
             worker: None,
             analysis_id: None,
+            plan_id: None,
             visible_volume_id: None,
             active_volume_id: None,
             active_map_bins: Vec::new(),
@@ -500,23 +518,133 @@ impl qobject::Controller {
             return;
         };
         match client.build_plan(analysis_id, &policy) {
-            Ok((_, plan)) => {
+            Ok((plan_id, plan)) => {
                 let count = count_i32(plan.candidates.len());
                 let estimated_rewrite_bytes = plan.estimated_rewrite_bytes as f64;
                 self.as_mut().rust_mut().plan_candidates = plan.candidates;
+                self.as_mut().rust_mut().plan_id = Some(plan_id);
                 self.as_mut().set_plan_candidate_count(count);
                 self.as_mut()
                     .set_plan_estimated_rewrite_bytes(estimated_rewrite_bytes);
                 let revision = self.plan_revision.wrapping_add(1).max(1);
                 self.as_mut().set_plan_revision(revision);
-                self.as_mut().set_status(QString::from(
-                    "Defragmentation preview ready (execution is disabled in v0)",
-                ));
+                self.as_mut()
+                    .set_status(QString::from("Defragmentation plan ready"));
             }
             Err(error) => self
                 .as_mut()
                 .set_status(QString::from(&format!("Could not build plan: {error}"))),
         }
+    }
+
+    fn start_defrag(mut self: Pin<&mut Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(plan_id) = self.as_mut().rust_mut().plan_id.take() else {
+            self.as_mut()
+                .set_status(QString::from("Build a defragmentation plan first"));
+            return;
+        };
+        let Some(client) = self.client.as_ref().cloned() else {
+            self.as_mut()
+                .set_status(QString::from("The helper is unavailable"));
+            return;
+        };
+        let Some(volume_id) = self.visible_volume_id else {
+            return;
+        };
+        let (command_sender, command_receiver) = mpsc::channel();
+        self.as_mut().rust_mut().worker = Some(command_sender);
+        self.as_mut().rust_mut().active_volume_id = Some(volume_id);
+        self.as_mut().rust_mut().active_map_bins = self.map_bins.clone();
+        self.as_mut().set_busy(true);
+        self.as_mut().set_paused(false);
+        self.as_mut()
+            .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
+        self.as_mut()
+            .set_status(QString::from("Starting defragmentation…"));
+
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let handle = match client.start_defrag(plan_id) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = qt_thread.queue(move |controller| {
+                        controller.apply_update(UiUpdate::Failed(error.to_string()))
+                    });
+                    return;
+                }
+            };
+            loop {
+                loop {
+                    match command_receiver.try_recv() {
+                        Ok(WorkerCommand::Pause) => handle.pause(),
+                        Ok(WorkerCommand::Resume) => handle.resume(),
+                        Ok(WorkerCommand::Cancel) => handle.cancel(),
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            handle.cancel();
+                            return;
+                        }
+                    }
+                }
+                let update = match handle.events().recv_timeout(Duration::from_millis(50)) {
+                    Ok(ServiceEvent::MapUpdated {
+                        full_snapshot,
+                        bins,
+                        ..
+                    }) => Some(UiUpdate::Map {
+                        full: full_snapshot,
+                        bins,
+                    }),
+                    Ok(ServiceEvent::DefragActivity {
+                        reading, writing, ..
+                    }) => Some(UiUpdate::Activity { reading, writing }),
+                    Ok(ServiceEvent::DefragProgress(progress)) => Some(UiUpdate::Progress {
+                        files: progress.files_completed,
+                        bytes: progress.bytes_moved,
+                        detail: progress
+                            .current_path
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| format!("{:?}", progress.phase)),
+                    }),
+                    Ok(ServiceEvent::DefragFinished { report, .. }) => {
+                        Some(UiUpdate::DefragFinished {
+                            report: prepare_ui_report(report),
+                            stopped: false,
+                        })
+                    }
+                    Ok(ServiceEvent::DefragStopped { report, .. }) => {
+                        Some(UiUpdate::DefragFinished {
+                            report: prepare_ui_report(report),
+                            stopped: true,
+                        })
+                    }
+                    Ok(ServiceEvent::JobCancelled { .. }) => Some(UiUpdate::Cancelled),
+                    Ok(ServiceEvent::Failed { message, .. }) => Some(UiUpdate::Failed(message)),
+                    Ok(_) => None,
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                if let Some(update) = update {
+                    let terminal = matches!(
+                        update,
+                        UiUpdate::DefragFinished { .. } | UiUpdate::Cancelled | UiUpdate::Failed(_)
+                    );
+                    if qt_thread
+                        .queue(move |controller| controller.apply_update(update))
+                        .is_err()
+                    {
+                        handle.cancel();
+                        break;
+                    }
+                    if terminal {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     fn volume_id(&self, index: i32) -> QString {
@@ -529,7 +657,13 @@ impl qobject::Controller {
     fn volume_mount_point(&self, index: i32) -> QString {
         self.volume_row(index)
             .map_or_else(QString::default, |volume| {
-                QString::from(&volume.mount_point.display().to_string())
+                QString::from(
+                    &volume
+                        .mount_point
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "Unmounted".to_owned()),
+                )
             })
     }
 
@@ -550,17 +684,23 @@ impl qobject::Controller {
 
     fn volume_used_bytes(&self, index: i32) -> f64 {
         self.volume_row(index)
-            .map_or(0.0, |volume| volume.used_bytes as f64)
+            .and_then(|volume| volume.used_bytes)
+            .map_or(0.0, |bytes| bytes as f64)
     }
 
     fn volume_free_bytes(&self, index: i32) -> f64 {
         self.volume_row(index)
-            .map_or(0.0, |volume| volume.free_bytes as f64)
+            .and_then(|volume| volume.free_bytes)
+            .map_or(0.0, |bytes| bytes as f64)
     }
 
     fn volume_supported(&self, index: i32) -> bool {
-        self.volume_row(index)
-            .is_some_and(|volume| matches!(volume.support, SupportStatus::ReadOnly))
+        self.volume_row(index).is_some_and(|volume| {
+            matches!(
+                volume.support,
+                SupportStatus::ReadOnly | SupportStatus::Defragmentable
+            )
+        })
     }
 
     fn volume_has_report(&self, index: i32) -> bool {
@@ -641,6 +781,7 @@ impl qobject::Controller {
 
     fn clear_display(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().analysis_id = None;
+        self.as_mut().rust_mut().plan_id = None;
         self.as_mut().rust_mut().map_bins.clear();
         self.as_mut().rust_mut().file_rows.clear();
         self.as_mut().rust_mut().map_files.clear();
@@ -690,7 +831,7 @@ impl qobject::Controller {
             return;
         };
         let file_row_count = count_i32(cached.file_rows.len());
-        self.as_mut().rust_mut().analysis_id = Some(cached.analysis_id);
+        self.as_mut().rust_mut().analysis_id = cached.analysis_id;
         self.as_mut().rust_mut().map_bins = cached.map_bins;
         self.as_mut().rust_mut().file_rows = cached.file_rows;
         self.as_mut().rust_mut().map_files = cached.map_files;
@@ -775,38 +916,7 @@ impl qobject::Controller {
                 analysis_id,
                 report,
             } => {
-                let volume_id = report.volume_id;
-                let ranges = report
-                    .map_files
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(file_index, file)| {
-                        file.physical_ranges
-                            .iter()
-                            .copied()
-                            .map(move |physical| MapFileRange {
-                                file_index,
-                                physical,
-                            })
-                    })
-                    .collect();
-                let mut map_files = report.map_files;
-                for file in &mut map_files {
-                    file.physical_ranges.clear();
-                }
-                let cached = CachedAnalysis {
-                    analysis_id,
-                    fragmented_basis_points: report.fragmented_basis_points,
-                    coverage_basis_points: report.coverage_basis_points,
-                    files_scanned: report.files_scanned,
-                    bytes_scanned: report.bytes_scanned,
-                    skipped_entries: report.skipped_entries,
-                    status: report.status,
-                    map_bins: report.map_bins,
-                    file_rows: report.file_rows,
-                    map_files,
-                    map_file_ranges: Arc::new(ranges),
-                };
+                let (volume_id, cached) = cache_report(report, Some(analysis_id));
                 self.as_mut().rust_mut().analyses.insert(volume_id, cached);
                 let analysis_revision = self.analysis_revision.wrapping_add(1);
                 self.as_mut().set_analysis_revision(analysis_revision);
@@ -821,6 +931,35 @@ impl qobject::Controller {
                     self.as_mut().display_volume(volume_id);
                 }
             }
+            UiUpdate::Activity { reading, writing } => {
+                let data = encode_activity(&reading, &writing);
+                self.as_mut()
+                    .set_activity_data(QByteArray::from(data.as_slice()));
+                let revision = self.activity_revision.wrapping_add(1);
+                self.as_mut().set_activity_revision(revision);
+            }
+            UiUpdate::DefragFinished { report, stopped } => {
+                let (volume_id, cached) = cache_report(report, None);
+                self.as_mut().rust_mut().analyses.insert(volume_id, cached);
+                self.as_mut().rust_mut().worker = None;
+                self.as_mut().rust_mut().active_volume_id = None;
+                self.as_mut().rust_mut().active_map_bins.clear();
+                self.as_mut().rust_mut().active_status.clear();
+                self.as_mut().set_activity_data(QByteArray::default());
+                self.as_mut().set_busy(false);
+                self.as_mut().set_paused(false);
+                self.as_mut().set_analyzing_volume_id(QString::default());
+                let analysis_revision = self.analysis_revision.wrapping_add(1);
+                self.as_mut().set_analysis_revision(analysis_revision);
+                if self.visible_volume_id == Some(volume_id) {
+                    self.as_mut().display_volume(volume_id);
+                    self.as_mut().set_status(QString::from(if stopped {
+                        "Defragmentation stopped safely"
+                    } else {
+                        "Defragmentation complete"
+                    }));
+                }
+            }
             UiUpdate::Cancelled => {
                 let active_volume_id = self.active_volume_id;
                 self.as_mut().rust_mut().worker = None;
@@ -830,6 +969,7 @@ impl qobject::Controller {
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
                 self.as_mut().set_analyzing_volume_id(QString::default());
+                self.as_mut().set_activity_data(QByteArray::default());
                 if let Some(volume_id) = active_volume_id
                     && Some(volume_id) == self.visible_volume_id
                 {
@@ -847,6 +987,7 @@ impl qobject::Controller {
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
                 self.as_mut().set_analyzing_volume_id(QString::default());
+                self.as_mut().set_activity_data(QByteArray::default());
                 if let Some(volume_id) = active_volume_id
                     && Some(volume_id) == self.visible_volume_id
                 {
@@ -857,6 +998,57 @@ impl qobject::Controller {
             }
         }
     }
+}
+
+fn cache_report(report: UiReport, analysis_id: Option<AnalysisId>) -> (VolumeId, CachedAnalysis) {
+    let volume_id = report.volume_id;
+    let ranges = report
+        .map_files
+        .iter()
+        .enumerate()
+        .flat_map(|(file_index, file)| {
+            file.physical_ranges
+                .iter()
+                .copied()
+                .map(move |physical| MapFileRange {
+                    file_index,
+                    physical,
+                })
+        })
+        .collect();
+    let mut map_files = report.map_files;
+    for file in &mut map_files {
+        file.physical_ranges.clear();
+    }
+    (
+        volume_id,
+        CachedAnalysis {
+            analysis_id,
+            fragmented_basis_points: report.fragmented_basis_points,
+            coverage_basis_points: report.coverage_basis_points,
+            files_scanned: report.files_scanned,
+            bytes_scanned: report.bytes_scanned,
+            skipped_entries: report.skipped_entries,
+            status: report.status,
+            map_bins: report.map_bins,
+            file_rows: report.file_rows,
+            map_files,
+            map_file_ranges: Arc::new(ranges),
+        },
+    )
+}
+
+fn encode_activity(reading: &[PhysicalRange], writing: &[PhysicalRange]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity((reading.len() + writing.len()) * 24);
+    for (kind, ranges) in [(1u8, reading), (2u8, writing)] {
+        for range in ranges {
+            bytes.extend_from_slice(&range.offset_bytes.to_le_bytes());
+            bytes.extend_from_slice(&range.length_bytes.to_le_bytes());
+            bytes.push(kind);
+            bytes.extend_from_slice(&[0; 7]);
+        }
+    }
+    bytes
 }
 
 fn merge_map_bins(target: &mut Vec<MapBin>, full: bool, bins: Vec<MapBin>) {
@@ -925,6 +1117,7 @@ fn encode_map(bins: &[MapBin], contributors: &[[MapContributor; MAX_MAP_CONTRIBU
             bin.mix.contiguous_data,
             bin.mix.fragmented_data,
             bin.mix.unscanned_data,
+            bin.mix.defrag_staging,
         ]
         .into_iter()
         .chain(metadata_values(bin.mix.metadata))
@@ -1091,7 +1284,7 @@ fn resample_map(source: &[MapBin], count: usize, total_length: u64) -> Vec<MapBi
             .offset_bytes
             .saturating_add(target_start.saturating_sub(source_start));
         let mut length = 0u64;
-        let mut categories = [0u128; 4];
+        let mut categories = [0u128; 5];
         let mut metadata = [0u128; 9];
         let mut cursor = target_start;
         let mut index = source_index;
@@ -1108,6 +1301,7 @@ fn resample_map(source: &[MapBin], count: usize, total_length: u64) -> Vec<MapBi
             categories[1] += u128::from(bin.mix.contiguous_data) * span;
             categories[2] += u128::from(bin.mix.fragmented_data) * span;
             categories[3] += u128::from(bin.mix.unscanned_data) * span;
+            categories[4] += u128::from(bin.mix.defrag_staging) * span;
             for (total, value) in metadata.iter_mut().zip(metadata_values(bin.mix.metadata)) {
                 *total += u128::from(value) * span;
             }
@@ -1129,6 +1323,7 @@ fn resample_map(source: &[MapBin], count: usize, total_length: u64) -> Vec<MapBi
                 contiguous_data: scale(categories[1]),
                 fragmented_data: scale(categories[2]),
                 unscanned_data: scale(categories[3]),
+                defrag_staging: scale(categories[4]),
                 metadata: MetadataMix {
                     filesystem_headers: metadata[0],
                     journal: metadata[1],
@@ -1314,6 +1509,7 @@ mod tests {
                 contiguous_data: 2,
                 fragmented_data: 3,
                 unscanned_data: 4,
+                defrag_staging: 14,
                 metadata: MetadataMix {
                     filesystem_headers: 5,
                     journal: 6,
@@ -1338,12 +1534,15 @@ mod tests {
         assert_eq!(bytes.len(), MAP_RECORD_BYTES);
         assert_eq!(&bytes[..8], &0x0102_0304_0506_0708u64.to_le_bytes());
         assert_eq!(&bytes[8..16], &0x1112_1314_1516_1718u64.to_le_bytes());
-        for (index, value) in (1u16..=13).enumerate() {
+        for (index, value) in [1u16, 2, 3, 4, 14, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+            .into_iter()
+            .enumerate()
+        {
             let offset = 16 + index * 2;
             assert_eq!(&bytes[offset..offset + 2], &value.to_le_bytes());
         }
-        assert_eq!(&bytes[42..46], &7u32.to_le_bytes());
-        assert_eq!(&bytes[46..48], &2_500u16.to_le_bytes());
-        assert_eq!(&bytes[48..52], &u32::MAX.to_le_bytes());
+        assert_eq!(&bytes[44..48], &7u32.to_le_bytes());
+        assert_eq!(&bytes[48..50], &2_500u16.to_le_bytes());
+        assert_eq!(&bytes[50..54], &u32::MAX.to_le_bytes());
     }
 }

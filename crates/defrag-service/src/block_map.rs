@@ -4,20 +4,21 @@ use defrag_domain::{CategoryMix, MapBin, MetadataMix};
 
 use crate::linux::{FsMapKind, FsMapRange, MetadataKind};
 
-const CATEGORY_COUNT: usize = 13;
+const CATEGORY_COUNT: usize = 14;
 const FREE: usize = 0;
 const CONTIGUOUS_DATA: usize = 1;
 const FRAGMENTED_DATA: usize = 2;
 const UNSCANNED_DATA: usize = 3;
-const FILESYSTEM_HEADERS: usize = 4;
-const JOURNAL: usize = 5;
-const ALLOCATION_TABLES: usize = 6;
-const FILE_METADATA: usize = 7;
-const GROUP_DESCRIPTORS: usize = 8;
-const BLOCK_BITMAPS: usize = 9;
-const FILE_BITMAPS: usize = 10;
-const RESERVED: usize = 11;
-const OTHER_METADATA: usize = 12;
+const DEFRAG_STAGING: usize = 4;
+const FILESYSTEM_HEADERS: usize = 5;
+const JOURNAL: usize = 6;
+const ALLOCATION_TABLES: usize = 7;
+const FILE_METADATA: usize = 8;
+const GROUP_DESCRIPTORS: usize = 9;
+const BLOCK_BITMAPS: usize = 10;
+const FILE_BITMAPS: usize = 11;
+const RESERVED: usize = 12;
+const OTHER_METADATA: usize = 13;
 
 pub(crate) struct BinAccumulator {
     start: u64,
@@ -89,6 +90,19 @@ impl BinAccumulator {
         self.changed.extend(changed);
     }
 
+    pub(crate) fn mark_staging(&mut self, physical: u64, length: u64) {
+        let mut changed = Vec::new();
+        self.for_overlaps_indexed(physical, length, |index, raw, overlap| {
+            let moved = raw[UNSCANNED_DATA].min(overlap);
+            raw[UNSCANNED_DATA] -= moved;
+            raw[DEFRAG_STAGING] = raw[DEFRAG_STAGING].saturating_add(moved);
+            if moved > 0 {
+                changed.push(index);
+            }
+        });
+        self.changed.extend(changed);
+    }
+
     fn for_overlaps(
         &mut self,
         physical: u64,
@@ -145,6 +159,7 @@ impl BinAccumulator {
                 contiguous_data: part(raw[CONTIGUOUS_DATA]),
                 fragmented_data: part(raw[FRAGMENTED_DATA]),
                 unscanned_data: part(raw[UNSCANNED_DATA]),
+                defrag_staging: part(raw[DEFRAG_STAGING]),
                 metadata: MetadataMix {
                     filesystem_headers: part(raw[FILESYSTEM_HEADERS]),
                     journal: part(raw[JOURNAL]),

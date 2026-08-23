@@ -114,6 +114,19 @@ pub enum IoctlError {
     InvalidBlockSize(libc::c_int),
     #[error("file is too large for the legacy FIBMAP interface")]
     FileTooLargeForFibmap,
+    #[error("EXT4_IOC_MOVE_EXT returned an invalid moved length {0}")]
+    InvalidMovedLength(u64),
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct MoveExtent {
+    reserved: i32,
+    donor_fd: u32,
+    orig_start: u64,
+    donor_start: u64,
+    len: u64,
+    moved_len: u64,
 }
 
 #[repr(C)]
@@ -203,6 +216,14 @@ impl<const N: usize> FsMapRequest<N> {
 }
 
 pub fn fiemap(file: &File) -> Result<Vec<FileExtent>, IoctlError> {
+    fiemap_with_flags(file, 0)
+}
+
+pub fn fiemap_sync(file: &File) -> Result<Vec<FileExtent>, IoctlError> {
+    fiemap_with_flags(file, FIEMAP_FLAG_SYNC)
+}
+
+fn fiemap_with_flags(file: &File, flags: u32) -> Result<Vec<FileExtent>, IoctlError> {
     const BATCH: usize = 256;
     const FIEMAP_HEADER_SIZE: usize = offset_of!(FiemapRequest<1>, extents);
     let request_code = iowr(b'f', 11, FIEMAP_HEADER_SIZE);
@@ -211,7 +232,7 @@ pub fn fiemap(file: &File) -> Result<Vec<FileExtent>, IoctlError> {
 
     loop {
         let mut request = FiemapRequest::<BATCH>::new(start);
-        debug_assert_eq!(request.flags & FIEMAP_FLAG_SYNC, 0);
+        request.flags = flags;
         // SAFETY: request is a writable C-compatible buffer whose encoded
         // header size matches struct fiemap; the trailing extent array has
         // exactly extent_count entries.
@@ -252,6 +273,54 @@ pub fn fiemap(file: &File) -> Result<Vec<FileExtent>, IoctlError> {
     Ok(result)
 }
 
+pub fn filesystem_block_size(file: &File) -> Result<u64, IoctlError> {
+    const FIGETBSZ: libc::c_ulong = 2;
+    let mut block_size: libc::c_int = 0;
+    // SAFETY: block_size is writable storage with the type FIGETBSZ expects.
+    if unsafe { libc::ioctl(file.as_raw_fd(), FIGETBSZ, &mut block_size) } < 0 {
+        return Err(IoctlError::Io {
+            operation: "FIGETBSZ",
+            source: io::Error::last_os_error(),
+        });
+    }
+    if block_size <= 0 {
+        return Err(IoctlError::InvalidBlockSize(block_size));
+    }
+    Ok(block_size as u64)
+}
+
+pub fn move_extents(
+    original: &File,
+    donor: &File,
+    logical_block: u64,
+    block_count: u64,
+) -> Result<u64, IoctlError> {
+    let donor_fd = u32::try_from(donor.as_raw_fd()).map_err(|_| IoctlError::Io {
+        operation: "EXT4_IOC_MOVE_EXT donor fd",
+        source: io::Error::from_raw_os_error(libc::EBADF),
+    })?;
+    let mut request = MoveExtent {
+        donor_fd,
+        orig_start: logical_block,
+        donor_start: logical_block,
+        len: block_count,
+        ..MoveExtent::default()
+    };
+    let request_code = iowr(b'f', 15, size_of::<MoveExtent>());
+    // SAFETY: request matches the Linux move_extent UAPI and both descriptors
+    // remain open for the duration of the ioctl.
+    if unsafe { libc::ioctl(original.as_raw_fd(), request_code, &mut request) } < 0 {
+        return Err(IoctlError::Io {
+            operation: "EXT4_IOC_MOVE_EXT",
+            source: io::Error::last_os_error(),
+        });
+    }
+    if request.moved_len == 0 || request.moved_len > block_count {
+        return Err(IoctlError::InvalidMovedLength(request.moved_len));
+    }
+    Ok(request.moved_len)
+}
+
 /// Return FAT-family file extents using FIEMAP when a kernel implements it,
 /// with the older FIBMAP interface as the compatibility path.
 ///
@@ -275,21 +344,8 @@ pub fn fat_file_extents(file: &File, logical_bytes: u64) -> Result<Vec<FileExten
 
 fn fibmap(file: &File, logical_bytes: u64) -> Result<Vec<FileExtent>, IoctlError> {
     // _IO(0x00, 2) and _IO(0x00, 1); direction and encoded size are both zero.
-    const FIGETBSZ: libc::c_ulong = 2;
     const FIBMAP: libc::c_ulong = 1;
-
-    let mut block_size: libc::c_int = 0;
-    // SAFETY: block_size points to writable storage expected by FIGETBSZ.
-    if unsafe { libc::ioctl(file.as_raw_fd(), FIGETBSZ, &mut block_size) } < 0 {
-        return Err(IoctlError::Io {
-            operation: "FIGETBSZ",
-            source: io::Error::last_os_error(),
-        });
-    }
-    if block_size <= 0 {
-        return Err(IoctlError::InvalidBlockSize(block_size));
-    }
-    let block_size = block_size as u64;
+    let block_size = filesystem_block_size(file)?;
     let block_count = logical_bytes.div_ceil(block_size);
     if block_count > libc::c_int::MAX as u64 {
         return Err(IoctlError::FileTooLargeForFibmap);
@@ -442,6 +498,7 @@ mod tests {
         assert_eq!(offset_of!(FiemapRequest<1>, extents), 32);
         assert_eq!(size_of::<FsMap>(), 64);
         assert_eq!(offset_of!(FsMapRequest<1>, records), 192);
+        assert_eq!(size_of::<MoveExtent>(), 40);
     }
 
     #[test]

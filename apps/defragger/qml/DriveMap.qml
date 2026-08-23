@@ -7,6 +7,8 @@ Item {
     id: root
 
     property var mapData
+    property var activityData
+    property int activityRevision: 0
     property var detailsProvider: null
     property string volumeId: ""
     property double capacityBytes: 0
@@ -14,14 +16,15 @@ Item {
     property int sourceRevision: 0
     property int renderedGeneration: 0
     property var mapView: null
+    property var activityView: null
     property int binCount: 0
     property int hoveredIndex: -1
     property bool workerBusy: false
     property bool rebuildPending: false
     property bool geometryPending: false
     property int rebuildGeneration: 0
-    readonly property int recordBytes: 72
-    readonly property int contributorOffset: 42
+    readonly property int recordBytes: 74
+    readonly property int contributorOffset: 44
     readonly property int maxContributors: 5
 
     signal rebuildRequested(
@@ -48,6 +51,7 @@ Item {
         [qsTr("Empty"), "#ffffff"],
         [qsTr("Data"), "#35a853"],
         [qsTr("Fragmented"), "#dc4f4a"],
+        [qsTr("Defrag staging"), "#7c5ce0"],
         [qsTr("Not analyzed"), "#73777f"]
     ]
 
@@ -94,35 +98,58 @@ Item {
         return mapView.getUint32(index * recordBytes + byteOffset, true)
     }
 
+    function activityKind(index) {
+        if (!activityView || !mapView)
+            return 0
+        const binStart = uint64(index, 0)
+        const binEnd = binStart + uint64(index, 8)
+        let result = 0
+        const count = Math.floor(activityView.byteLength / 24)
+        for (let i = 0; i < count; ++i) {
+            const offset = i * 24
+            const start = activityView.getUint32(offset, true)
+                + activityView.getUint32(offset + 4, true) * 4294967296
+            const length = activityView.getUint32(offset + 8, true)
+                + activityView.getUint32(offset + 12, true) * 4294967296
+            if (start < binEnd && start + length > binStart)
+                result |= activityView.getUint8(offset + 16)
+        }
+        return result
+    }
+
     function cellCategory(index) {
         if (field(index, 2) > 0)
             return 1
+        if (field(index, 4) > 0)
+            return 2
         let winner = -1
         let winnerValue = 0
         for (let i = 0; i < metadataTypes.length; ++i) {
-            const value = field(index, 4 + i)
+            const value = field(index, 5 + i)
             if (value > winnerValue) {
                 winner = i
                 winnerValue = value
             }
         }
         if (winner >= 0)
-            return 2 + winner
+            return 3 + winner
         if (field(index, 3) > 0)
-            return 11
-        if (field(index, 1) > 0)
             return 12
+        if (field(index, 1) > 0)
+            return 13
         return 0
     }
 
     function categoryLabel(category) {
         if (category === 1)
             return qsTr("Fragmented data")
-        if (category >= 2 && category <= 10)
-            return metadataTypes[category - 2][1]
-        if (category === 11)
-            return qsTr("Not analyzed")
+        if (category === 2)
+            return qsTr("Defrag staging")
+        if (category >= 3 && category <= 11)
+            return metadataTypes[category - 3][1]
         if (category === 12)
+            return qsTr("Not analyzed")
+        if (category === 13)
             return qsTr("Contiguous data")
         return qsTr("Empty")
     }
@@ -130,11 +157,13 @@ Item {
     function categoryColor(category) {
         if (category === 1)
             return "#dc4f4a"
-        if (category >= 2 && category <= 10)
-            return metadataTypes[category - 2][2]
-        if (category === 11)
-            return "#73777f"
+        if (category === 2)
+            return "#7c5ce0"
+        if (category >= 3 && category <= 11)
+            return metadataTypes[category - 3][2]
         if (category === 12)
+            return "#73777f"
+        if (category === 13)
             return "#35a853"
         return "#ffffff"
     }
@@ -142,11 +171,13 @@ Item {
     function categoryCoverage(index, category) {
         if (category === 1)
             return field(index, 2)
-        if (category >= 2 && category <= 10)
+        if (category === 2)
+            return field(index, 4)
+        if (category >= 3 && category <= 11)
             return field(index, category + 2)
-        if (category === 11)
-            return field(index, 3)
         if (category === 12)
+            return field(index, 3)
+        if (category === 13)
             return field(index, 1)
         return 10000
     }
@@ -218,14 +249,15 @@ Item {
         append(qsTr("Fragmented data"), field(index, 2))
         append(qsTr("Contiguous data"), field(index, 1))
         append(qsTr("Not analyzed"), field(index, 3))
+        append(qsTr("Defrag staging"), field(index, 4))
         for (let i = 0; i < metadataTypes.length; ++i) {
             const type = metadataTypes[i]
-            append(type[1], field(index, 4 + i))
+            append(type[1], field(index, 5 + i))
         }
         let described = field(index, 0) + field(index, 1)
-            + field(index, 2) + field(index, 3)
+            + field(index, 2) + field(index, 3) + field(index, 4)
         for (let i = 0; i < metadataTypes.length; ++i)
-            described += field(index, 4 + i)
+            described += field(index, 5 + i)
         append(qsTr("Empty"), Math.min(10000, field(index, 0) + Math.max(0, 10000 - described)))
         return rows
     }
@@ -255,6 +287,20 @@ Item {
         hoveredIndex = -1
         requestRebuild(false)
     }
+    function refreshActivity() {
+        if (!activityData || activityData.byteLength === 0) {
+            activityView = null
+        } else {
+            try {
+                activityView = new DataView(activityData)
+            } catch (error) {
+                activityView = null
+            }
+        }
+        canvas.requestPaint()
+    }
+    onActivityDataChanged: refreshActivity()
+    onActivityRevisionChanged: refreshActivity()
     onVolumeIdChanged: {
         // Selection is part of the map identity. Drop the previous volume's
         // pixels immediately, then publish a map for the new selection.
@@ -357,6 +403,23 @@ Item {
                     : Qt.rgba(0.12, 0.14, 0.16, 0.85)
                 ctx.lineWidth = i === root.hoveredIndex ? 2 : 1
                 ctx.strokeRect(x + 0.5, y + 0.5, layout.cell - 1, layout.cell - 1)
+                const activity = root.activityKind(i)
+                if (activity & 1) {
+                    ctx.strokeStyle = "#25a7e8"
+                    ctx.lineWidth = 2
+                    ctx.strokeRect(x + 0.5, y + 0.5, layout.cell - 1, layout.cell - 1)
+                }
+                if (activity & 2) {
+                    ctx.strokeStyle = "#f59e32"
+                    ctx.lineWidth = 2
+                    const inset = activity & 1 ? 2.5 : 0.5
+                    ctx.strokeRect(
+                        x + inset,
+                        y + inset,
+                        layout.cell - inset * 2,
+                        layout.cell - inset * 2
+                    )
+                }
             }
         }
 

@@ -82,6 +82,25 @@ impl PrivilegedClient {
                 &(volume_id.0),
             )?
             .expect("StartAnalysis expects a reply");
+        self.watch_job(job_id)
+    }
+
+    pub fn start_defrag(
+        &self,
+        plan_id: PlanId,
+    ) -> Result<PrivilegedJobHandle, PrivilegedClientError> {
+        let proxy = self.proxy()?;
+        let job_id: u64 = proxy
+            .call_with_flags(
+                "StartDefrag",
+                MethodFlags::AllowInteractiveAuth.into(),
+                &(plan_id.0),
+            )?
+            .expect("StartDefrag expects a reply");
+        self.watch_job(job_id)
+    }
+
+    fn watch_job(&self, job_id: u64) -> Result<PrivilegedJobHandle, PrivilegedClientError> {
         let (sender, receiver) = mpsc::channel();
         let polling_client = self.clone();
         std::thread::Builder::new()
@@ -93,6 +112,8 @@ impl PrivilegedClient {
                             let terminal = matches!(
                                 event,
                                 ServiceEvent::AnalysisFinished { .. }
+                                    | ServiceEvent::DefragFinished { .. }
+                                    | ServiceEvent::DefragStopped { .. }
                                     | ServiceEvent::JobCancelled { .. }
                                     | ServiceEvent::Failed { .. }
                             );
@@ -157,7 +178,7 @@ impl PrivilegedClient {
 }
 
 /// Development client backed by the production helper interface on a private
-/// D-Bus peer connection. systemd starts the current GUI executable as a
+/// D-Bus peer connection. systemd starts the current client executable as a
 /// transient root service, so no helper binary or bus policy must be installed.
 #[derive(Clone)]
 #[cfg(feature = "development-client")]
@@ -193,14 +214,11 @@ impl DevelopmentClient {
                 "--uid=0",
                 "--description=Defragger transient development helper",
                 "--property=NoNewPrivileges=yes",
-                "--property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_RAWIO",
+                "--property=CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_RAWIO CAP_SYS_ADMIN",
                 "--property=RestrictAddressFamilies=AF_UNIX",
                 "--property=LockPersonality=yes",
                 "--property=MemoryDenyWriteExecute=yes",
                 "--property=PrivateTmp=yes",
-                "--property=ProtectHome=read-only",
-                "--property=ProtectSystem=strict",
-                "--property=InaccessiblePaths=/dev",
                 "--property=ProtectControlGroups=yes",
                 "--property=ProtectKernelModules=yes",
                 "--property=ProtectKernelTunables=yes",
@@ -253,6 +271,13 @@ impl DevelopmentClient {
         policy: &DefragPolicy,
     ) -> Result<(PlanId, PlanSummary), PrivilegedClientError> {
         self.inner.build_plan(analysis_id, policy)
+    }
+
+    pub fn start_defrag(
+        &self,
+        plan_id: PlanId,
+    ) -> Result<PrivilegedJobHandle, PrivilegedClientError> {
+        self.inner.start_defrag(plan_id)
     }
 }
 

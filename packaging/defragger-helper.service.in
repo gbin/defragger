@@ -1,5 +1,5 @@
 [Unit]
-Description=Defragger privileged read-only analysis helper
+Description=Defragger privileged filesystem helper
 
 [Service]
 Type=dbus
@@ -7,14 +7,11 @@ BusName=net.gootz.defragger.Helper
 ExecStart=@CMAKE_INSTALL_FULL_LIBEXECDIR@/defragger-helper
 User=root
 NoNewPrivileges=yes
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_RAWIO
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_RAWIO CAP_SYS_ADMIN
 RestrictAddressFamilies=AF_UNIX
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 PrivateTmp=yes
-ProtectHome=read-only
-ProtectSystem=strict
-InaccessiblePaths=/dev
 ProtectControlGroups=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes

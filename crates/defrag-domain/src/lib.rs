@@ -17,23 +17,34 @@ pub struct PlanId(pub u64);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SupportStatus {
     ReadOnly,
+    Defragmentable,
     Unsupported { reason: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MountState {
+    MountedReadWrite,
+    MountedReadOnly,
+    Unmounted,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Volume {
     pub id: VolumeId,
-    pub mount_id: u64,
-    pub parent_mount_id: u64,
+    pub mount_id: Option<u64>,
+    pub parent_mount_id: Option<u64>,
     pub device_major: u32,
     pub device_minor: u32,
-    pub mount_point: PathBuf,
+    pub mount_point: Option<PathBuf>,
     pub source: String,
     pub filesystem: String,
+    pub label: Option<String>,
+    pub uuid: Option<String>,
+    pub mount_state: MountState,
     pub read_only: bool,
     pub capacity_bytes: u64,
-    pub used_bytes: u64,
-    pub free_bytes: u64,
+    pub used_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
     pub support: SupportStatus,
 }
 
@@ -62,6 +73,8 @@ pub struct CategoryMix {
     pub contiguous_data: u16,
     pub fragmented_data: u16,
     pub unscanned_data: u16,
+    #[serde(default)]
+    pub defrag_staging: u16,
     pub metadata: MetadataMix,
 }
 
@@ -172,6 +185,25 @@ pub enum AnalysisPhase {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DefragPhase {
+    Revalidating,
+    AllocatingDonor,
+    MovingExtents,
+    RefreshingMap,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DefragProgress {
+    pub job_id: JobId,
+    pub phase: DefragPhase,
+    pub files_completed: u64,
+    pub files_total: u64,
+    pub bytes_moved: u64,
+    pub bytes_total: u64,
+    pub current_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobProgress {
     pub job_id: JobId,
     pub phase: AnalysisPhase,
@@ -199,6 +231,9 @@ pub enum ServiceRequest {
         analysis_id: AnalysisId,
         policy: DefragPolicy,
     },
+    StartDefrag {
+        plan_id: PlanId,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -221,6 +256,30 @@ pub enum ServiceEvent {
     PlanFinished {
         plan_id: PlanId,
         summary: PlanSummary,
+    },
+    DefragStarted {
+        job_id: JobId,
+        plan_id: PlanId,
+    },
+    DefragProgress(DefragProgress),
+    DefragActivity {
+        job_id: JobId,
+        reading: Vec<PhysicalRange>,
+        writing: Vec<PhysicalRange>,
+    },
+    DefragFileUpdated {
+        job_id: JobId,
+        file: FileReport,
+        fragmentation: FragmentationMetrics,
+        bytes_moved: u64,
+    },
+    DefragFinished {
+        job_id: JobId,
+        report: Box<AnalysisReport>,
+    },
+    DefragStopped {
+        job_id: JobId,
+        report: Box<AnalysisReport>,
     },
     JobPaused {
         job_id: JobId,

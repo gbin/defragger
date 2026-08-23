@@ -1,8 +1,8 @@
 # Defragger
 
-Defragger is a Plasma-first Linux filesystem analyzer written in Rust with a
-Qt Quick/Kirigami interface. The v0 release is deliberately read-only and
-supports mounted ext4, FAT12/16/32, and exFAT filesystems.
+Defragger is a Plasma-first Linux filesystem analyzer and ext4 defragmenter
+written in Rust with Qt Quick/Kirigami and command-line clients. It analyzes
+mounted or offline ext4 and analyzes mounted FAT12/16/32 and exFAT.
 
 It calls Linux filesystem ioctls directly. It does not execute `e4defrag`,
 `filefrag`, or any other filesystem utility.
@@ -28,6 +28,21 @@ cargo run -r
 # or, with just installed:
 just run
 ```
+
+The command-line client uses the same transient helper and authentication:
+
+```sh
+cargo run -r -p defragger-cli -- list
+cargo run -r -p defragger-cli -- analyze /dev/nvme0n1p2
+cargo run -r -p defragger-cli -- defrag /dev/nvme0n1p2 --yes --require-fully-defragmented
+```
+
+Shortcuts: `just list`, `just analyze DEVICE`, and `just defrag DEVICE`. Device
+symlinks, mount points, and loop backing-image paths are also accepted.
+
+It streams stable textual progress, physical read/write ranges, and final
+metrics. Ctrl-C requests cancellation and waits for a safe extent-move
+boundary. Root-only fixture tests can bypass the helper with `--direct`.
 
 The transient process runs the same helper implementation as the installed
 service and talks to the GUI over a private D-Bus peer connection. If the GUI
@@ -73,11 +88,10 @@ from Cargo while developing:
 cargo run --release --package defragger --no-default-features --features system-helper
 ```
 
-The system-wide install includes a root-owned D-Bus helper and a PolicyKit
-action. Pressing **Analyze** allows the desktop PolicyKit agent to ask for
-administrator authentication. Only the read-only helper is privileged; the
-Qt/Kirigami GUI continues to run as the logged-in user. A per-user installation
-cannot install or activate this helper.
+The system-wide install includes a root-owned D-Bus helper and separate
+PolicyKit actions for analysis and modification. The desktop PolicyKit agent
+owns the authentication UI; the Qt/Kirigami GUI and CLI remain unprivileged. A
+per-user installation cannot install or activate this helper.
 
 Force Wayland in either mode with:
 
@@ -88,9 +102,9 @@ QT_QPA_PLATFORM=wayland cargo run --release --package defragger
 The analyzer does not follow symbolic links or cross mount boundaries. The
 installed helper can read protected files after PolicyKit authorization. FAT
 and exFAT file fragmentation uses FIEMAP where available and Linux's
-capability-gated FIBMAP fallback otherwise;
-the helper is restricted to the `CAP_DAC_READ_SEARCH` and `CAP_SYS_RAWIO`
-capabilities needed for these reads. Because Linux does not expose a
+capability-gated FIBMAP fallback otherwise. The helper uses a bounded
+capability set for protected-file inspection, private mounts, and ext4 extent
+moves. Because Linux does not expose a
 filesystem-wide allocation map for them, their map also leaves free space and
 filesystem metadata explicitly unknown.
 
@@ -100,5 +114,5 @@ hold, and is reevaluated when the window changes size. Tiles use one priority
 color: red fragmented data, gray unscanned allocation, white explicitly free,
 green contiguous data, or a typed metadata color. Partial occupancy produces
 a lighter shade, and hovering shows the exact composition and physical range.
-See [the architecture notes](docs/architecture.md) for the D-Bus/PolicyKit
-boundary and the separate future write boundary.
+See [the architecture notes](docs/architecture.md) for the D-Bus/PolicyKit and
+write boundaries.

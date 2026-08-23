@@ -525,6 +525,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "defragger-cli"
+version = "0.1.0"
+dependencies = [
+ "defrag-domain",
+ "defrag-service",
+ "defragger-helper",
+ "libc",
+]
+
+[[package]]
 name = "defragger-helper"
 version = "0.1.0"
 dependencies = [

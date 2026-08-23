@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs::{self, File, Metadata},
+    io,
     os::unix::fs::MetadataExt,
     path::PathBuf,
     time::{Duration, Instant},
@@ -60,6 +61,12 @@ impl FilesystemBackend for FatBackend {
         // Linux FAT and exFAT expose per-file block mappings, but not the
         // filesystem-wide GETFSMAP interface used by ext4. Keep all bytes
         // unknown until a file mapping positively identifies them.
+        let mount_point = volume.mount_point.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "FAT volume is not mounted for analysis",
+            )
+        })?;
         let mut bins = BinAccumulator::new(&[], volume.capacity_bytes, 4096);
         events.map_updated(true, bins.snapshot());
         let mut warnings = vec![
@@ -73,14 +80,14 @@ impl FilesystemBackend for FatBackend {
                 .to_owned(),
         ];
 
-        let mut stack = vec![volume.mount_point.clone()];
+        let mut stack = vec![mount_point.clone()];
         let mut seen_inodes = HashSet::new();
         let mut files = Vec::new();
         let mut scanned_ranges = Vec::new();
         let mut coverage = ScanCoverage {
             // statvfs used bytes include filesystem metadata, so this is an
             // intentionally conservative denominator for file-data coverage.
-            total_allocated_data_bytes: volume.used_bytes,
+            total_allocated_data_bytes: volume.used_bytes.unwrap_or(0),
             ..ScanCoverage::default()
         };
         let mut metrics = FragmentationMetrics::default();
@@ -119,7 +126,7 @@ impl FilesystemBackend for FatBackend {
                     continue;
                 }
                 match linux::mount_id(&path) {
-                    Ok(mount_id) if mount_id != volume.mount_id => continue,
+                    Ok(mount_id) if Some(mount_id) != volume.mount_id => continue,
                     Err(_) => {
                         coverage.skipped_entries = coverage.skipped_entries.saturating_add(1);
                         continue;
@@ -435,6 +442,15 @@ impl PreparedPlan for FatPlan {
     fn execution_requirements(&self) -> &ExecutionRequirements {
         &self.summary.requirements
     }
+
+    fn execute(
+        &self,
+        _job_id: JobId,
+        _control: &dyn JobControl,
+        _events: &dyn EventSink,
+    ) -> Result<crate::PlanExecution, ServiceError> {
+        Err(ServiceError::ExecutionUnavailable)
+    }
 }
 
 #[cfg(test)]
@@ -444,17 +460,20 @@ mod tests {
     fn volume(filesystem: &str) -> Volume {
         Volume {
             id: defrag_domain::VolumeId(1),
-            mount_id: 1,
-            parent_mount_id: 0,
+            mount_id: Some(1),
+            parent_mount_id: Some(0),
             device_major: 8,
             device_minor: 1,
-            mount_point: PathBuf::from("/media/test"),
+            mount_point: Some(PathBuf::from("/media/test")),
             source: "/dev/sda1".to_owned(),
             filesystem: filesystem.to_owned(),
+            label: None,
+            uuid: None,
+            mount_state: defrag_domain::MountState::MountedReadWrite,
             read_only: false,
             capacity_bytes: 1024,
-            used_bytes: 512,
-            free_bytes: 512,
+            used_bytes: Some(512),
+            free_bytes: Some(512),
             support: SupportStatus::ReadOnly,
         }
     }

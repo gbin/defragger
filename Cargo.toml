@@ -5,6 +5,7 @@ members = [
     "crates/defrag-domain",
     "crates/defrag-service",
     "apps/defragger",
+    "apps/defragger-cli",
     "apps/defragger-helper",
 ]
 

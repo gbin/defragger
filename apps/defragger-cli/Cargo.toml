@@ -1,0 +1,17 @@
+[package]
+name = "defragger-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["development-service"]
+development-service = ["dep:defragger-helper", "defrag-service/development-client"]
+system-helper = ["defrag-service/system-helper-client"]
+
+[dependencies]
+defrag-domain = { path = "../../crates/defrag-domain" }
+defrag-service = { path = "../../crates/defrag-service" }
+defragger-helper = { path = "../defragger-helper", optional = true }
+libc.workspace = true

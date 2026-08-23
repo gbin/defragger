@@ -9,8 +9,8 @@ use std::{
 };
 
 use defrag_domain::{
-    AnalysisId, DefragPolicy, JobId, JobProgress, PlanId, PlanSummary, ServiceEvent, SupportStatus,
-    Volume, VolumeId,
+    AnalysisId, DefragPolicy, DefragProgress, FragmentationMetrics, JobId, JobProgress,
+    PhysicalRange, PlanId, PlanSummary, ServiceEvent, SupportStatus, Volume, VolumeId,
 };
 use thiserror::Error;
 
@@ -30,6 +30,10 @@ pub enum ServiceError {
     UnsupportedFilesystem(String),
     #[error("analysis {0:?} was not found")]
     AnalysisNotFound(AnalysisId),
+    #[error("plan {0:?} was not found")]
+    PlanNotFound(PlanId),
+    #[error("defragmentation execution is unavailable for this plan")]
+    ExecutionUnavailable,
     #[error("job was cancelled")]
     Cancelled,
     #[error("service state was poisoned")]
@@ -39,6 +43,7 @@ pub enum ServiceError {
 struct Inner {
     backends: Vec<Arc<dyn FilesystemBackend>>,
     analyses: Mutex<HashMap<AnalysisId, Box<dyn FilesystemAnalysis>>>,
+    plans: Mutex<HashMap<PlanId, Box<dyn crate::PreparedPlan>>>,
     next_job: AtomicU64,
     next_analysis: AtomicU64,
     next_plan: AtomicU64,
@@ -61,6 +66,7 @@ impl InProcessClient {
             inner: Arc::new(Inner {
                 backends: default_backends(),
                 analyses: Mutex::new(HashMap::new()),
+                plans: Mutex::new(HashMap::new()),
                 next_job: AtomicU64::new(1),
                 next_analysis: AtomicU64::new(1),
                 next_plan: AtomicU64::new(1),
@@ -78,14 +84,22 @@ impl InProcessClient {
             .into_iter()
             .find(|volume| volume.id == volume_id)
             .ok_or(ServiceError::VolumeNotFound(volume_id))?;
-        if !matches!(volume.support, SupportStatus::ReadOnly) {
+        if !matches!(
+            volume.support,
+            SupportStatus::ReadOnly | SupportStatus::Defragmentable
+        ) {
             return Err(ServiceError::UnsupportedFilesystem(volume.filesystem));
         }
         let backend = self
             .inner
             .backends
             .iter()
-            .find(|backend| matches!(backend.probe(&volume), SupportStatus::ReadOnly))
+            .find(|backend| {
+                matches!(
+                    backend.probe(&volume),
+                    SupportStatus::ReadOnly | SupportStatus::Defragmentable
+                )
+            })
             .cloned()
             .ok_or_else(|| ServiceError::UnsupportedFilesystem(volume.filesystem.clone()))?;
 
@@ -107,7 +121,17 @@ impl InProcessClient {
                     job_id,
                     sender: sender.clone(),
                 };
-                match backend.analyze(&volume, job_id, thread_control.as_ref(), &sink) {
+                let mounted = match mounts::mount_for_job(&volume, false) {
+                    Ok(mounted) => mounted,
+                    Err(error) => {
+                        let _ = sender.send(ServiceEvent::Failed {
+                            job_id: Some(job_id),
+                            message: error.to_string(),
+                        });
+                        return;
+                    }
+                };
+                match backend.analyze(&mounted.volume, job_id, thread_control.as_ref(), &sink) {
                     Ok(analysis) => {
                         let analysis_id =
                             AnalysisId(inner.next_analysis.fetch_add(1, Ordering::Relaxed));
@@ -163,7 +187,73 @@ impl InProcessClient {
             .ok_or(ServiceError::AnalysisNotFound(analysis_id))?;
         let plan = analysis.build_plan(policy)?;
         let plan_id = PlanId(self.inner.next_plan.fetch_add(1, Ordering::Relaxed));
-        Ok((plan_id, plan.summary().clone()))
+        let summary = plan.summary().clone();
+        self.inner
+            .plans
+            .lock()
+            .map_err(|_| ServiceError::Poisoned)?
+            .insert(plan_id, plan);
+        Ok((plan_id, summary))
+    }
+
+    pub fn start_defrag(&self, plan_id: PlanId) -> Result<JobHandle, ServiceError> {
+        let plan = self
+            .inner
+            .plans
+            .lock()
+            .map_err(|_| ServiceError::Poisoned)?
+            .remove(&plan_id)
+            .ok_or(ServiceError::PlanNotFound(plan_id))?;
+        if !plan.execution_requirements().available_in_this_build {
+            return Err(ServiceError::ExecutionUnavailable);
+        }
+        let job_id = JobId(self.inner.next_job.fetch_add(1, Ordering::Relaxed));
+        let control = Arc::new(Control::default());
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(ServiceEvent::DefragStarted { job_id, plan_id })
+            .map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "defrag event receiver closed")
+            })?;
+        let thread_control = Arc::clone(&control);
+        std::thread::Builder::new()
+            .name(format!("defrag-execute-{}", job_id.0))
+            .spawn(move || {
+                let sink = ChannelSink {
+                    job_id,
+                    sender: sender.clone(),
+                };
+                match plan.execute(job_id, thread_control.as_ref(), &sink) {
+                    Ok(execution) => {
+                        let event = if execution.stopped {
+                            ServiceEvent::DefragStopped {
+                                job_id,
+                                report: Box::new(execution.report),
+                            }
+                        } else {
+                            ServiceEvent::DefragFinished {
+                                job_id,
+                                report: Box::new(execution.report),
+                            }
+                        };
+                        let _ = sender.send(event);
+                    }
+                    Err(ServiceError::Cancelled) => {
+                        let _ = sender.send(ServiceEvent::JobCancelled { job_id });
+                    }
+                    Err(error) => {
+                        let _ = sender.send(ServiceEvent::Failed {
+                            job_id: Some(job_id),
+                            message: error.to_string(),
+                        });
+                    }
+                }
+            })?;
+        Ok(JobHandle {
+            job_id,
+            receiver,
+            control,
+        })
     }
 
     pub fn discard_analysis(&self, analysis_id: AnalysisId) -> Result<(), ServiceError> {
@@ -247,6 +337,10 @@ impl JobControl for Control {
             Ok(())
         }
     }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
 }
 
 struct ChannelSink {
@@ -265,6 +359,33 @@ impl EventSink for ChannelSink {
             job_id: self.job_id,
             full_snapshot,
             bins,
+        });
+    }
+
+    fn defrag_progress(&self, mut progress: DefragProgress) {
+        progress.job_id = self.job_id;
+        let _ = self.sender.send(ServiceEvent::DefragProgress(progress));
+    }
+
+    fn defrag_activity(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>) {
+        let _ = self.sender.send(ServiceEvent::DefragActivity {
+            job_id: self.job_id,
+            reading,
+            writing,
+        });
+    }
+
+    fn defrag_file_updated(
+        &self,
+        file: defrag_domain::FileReport,
+        fragmentation: FragmentationMetrics,
+        bytes_moved: u64,
+    ) {
+        let _ = self.sender.send(ServiceEvent::DefragFileUpdated {
+            job_id: self.job_id,
+            file,
+            fragmentation,
+            bytes_moved,
         });
     }
 }

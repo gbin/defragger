@@ -2,13 +2,13 @@
 <component type="desktop-application">
   <id>net.gootz.defragger</id>
   <name>Defragger</name>
-  <summary>Analyze ext4 fragmentation on Linux</summary>
+  <summary>Analyze and defragment ext4 filesystems on Linux</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <description>
-    <p>Defragger visualizes ext4 allocation and file fragmentation using direct Linux kernel APIs. Version 0 is read-only and can preview, but cannot execute, a defragmentation plan.</p>
+    <p>Defragger visualizes and defragments mounted or offline ext4 filesystems using direct Linux kernel APIs. FAT and exFAT analysis is also available.</p>
   </description>
   <launchable type="desktop-id">net.gootz.defragger.desktop</launchable>
-  <provides><binary>defragger</binary></provides>
+  <provides><binary>defragger</binary><binary>defragger-cli</binary></provides>
   <categories><category>System</category></categories>
 </component>

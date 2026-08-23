@@ -186,6 +186,8 @@ Kirigami.ApplicationWindow {
                 && window.selectedVolumeId === String(controller.map_volume_id)
             sourceRevision: useAnalysis ? controller.map_revision : 0
             mapData: controller.display_map_data
+            activityData: controller.activity_data
+            activityRevision: controller.activity_revision
             detailsProvider: controller
             renderedGeneration: controller.display_map_generation
             onRebuildRequested: function(width, height, capacity, analysis, generation) {
@@ -384,7 +386,7 @@ Kirigami.ApplicationWindow {
         standardButtons: Controls.Dialog.Close
         ColumnLayout {
             anchors.fill: parent
-            Controls.Label { text: qsTr("Read-only v0 — no extents will be moved"); font.bold: true; color: Kirigami.Theme.neutralTextColor }
+            Controls.Label { text: qsTr("The helper will revalidate every file before moving it."); font.bold: true; color: Kirigami.Theme.neutralTextColor }
             Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(window.integer(controller.plan_candidate_count)).arg(window.bytes(controller.plan_estimated_rewrite_bytes)); wrapMode: Text.Wrap }
             ListView {
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true
@@ -394,7 +396,17 @@ Kirigami.ApplicationWindow {
                     width: ListView.view.width
                     text: controller.plan_candidate_path(index) + "  "
                         + controller.plan_candidate_current_runs(index) + " → "
-                        + controller.plan_candidate_target_runs(index) + " runs"
+                        + controller.plan_candidate_target_runs(index) + " " + qsTr("fragments")
+                }
+            }
+            Controls.Button {
+                Layout.alignment: Qt.AlignRight
+                text: qsTr("Start defragmentation")
+                icon.name: "media-playback-start"
+                enabled: controller.plan_candidate_count > 0 && !controller.busy
+                onClicked: {
+                    planDialog.close()
+                    controller.start_defrag()
                 }
             }
         }

@@ -10,7 +10,8 @@ mod service;
 use std::sync::Arc;
 
 use defrag_domain::{
-    AnalysisReport, DefragPolicy, ExecutionRequirements, PlanSummary, SupportStatus, Volume,
+    AnalysisReport, DefragPolicy, DefragProgress, ExecutionRequirements, PhysicalRange,
+    PlanSummary, SupportStatus, Volume,
 };
 
 #[cfg(feature = "development-client")]
@@ -22,10 +23,24 @@ pub use service::{InProcessClient, JobHandle, ServiceError};
 pub trait EventSink: Send + Sync {
     fn progress(&self, progress: defrag_domain::JobProgress);
     fn map_updated(&self, full_snapshot: bool, bins: Vec<defrag_domain::MapBin>);
+    fn defrag_progress(&self, progress: DefragProgress);
+    fn defrag_activity(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>);
+    fn defrag_file_updated(
+        &self,
+        file: defrag_domain::FileReport,
+        fragmentation: defrag_domain::FragmentationMetrics,
+        bytes_moved: u64,
+    );
 }
 
 pub trait JobControl: Send + Sync {
     fn checkpoint(&self) -> Result<(), ServiceError>;
+    fn is_cancelled(&self) -> bool;
+}
+
+pub struct PlanExecution {
+    pub report: AnalysisReport,
+    pub stopped: bool,
 }
 
 pub trait FilesystemBackend: Send + Sync {
@@ -48,6 +63,12 @@ pub trait FilesystemAnalysis: Send + Sync {
 pub trait PreparedPlan: Send + Sync {
     fn summary(&self) -> &PlanSummary;
     fn execution_requirements(&self) -> &ExecutionRequirements;
+    fn execute(
+        &self,
+        job_id: defrag_domain::JobId,
+        control: &dyn JobControl,
+        events: &dyn EventSink,
+    ) -> Result<PlanExecution, ServiceError>;
 }
 
 pub fn default_backends() -> Vec<Arc<dyn FilesystemBackend>> {

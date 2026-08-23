@@ -8,12 +8,26 @@ run:
 run-unprivileged:
     cargo run -r --no-default-features
 
+# Command-line client using the same transient development helper.
+list:
+    cargo run -r -p defragger-cli -- list
+
+analyze device:
+    cargo run -r -p defragger-cli -- analyze {{device}}
+
+defrag device:
+    cargo run -r -p defragger-cli -- defrag {{device}} --yes --require-fully-defragmented
+
 check:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo test --workspace
     cargo test --workspace --all-features
+
+# Root-capability ext4 loop-image test; the script elevates only required steps.
+integration-test:
+    crates/defrag-service/tests/fixtures/run-ext4-fixture.sh
 
 # Build the production split-service configuration without installing it.
 system-build:

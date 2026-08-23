@@ -6,13 +6,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use defrag_domain::{AnalysisId, DefragPolicy, ServiceEvent, VolumeId};
+use defrag_domain::{AnalysisId, DefragPolicy, PlanId, ServiceEvent, VolumeId};
 use defrag_service::{InProcessClient, JobHandle};
 use zbus::{Connection, connection::Builder, fdo, interface, message::Header, zvariant::Value};
 
 const BUS_NAME: &str = "net.gootz.defragger.Helper";
 const OBJECT_PATH: &str = "/net/gootz/defragger/Helper";
 const ACTION_READ_ALL: &str = "net.gootz.defragger.read-all-files";
+const ACTION_MODIFY: &str = "net.gootz.defragger.modify-filesystem";
 
 struct JobEntry {
     owner: String,
@@ -36,6 +37,7 @@ struct Helper {
     client: InProcessClient,
     jobs: Arc<Mutex<HashMap<u64, JobEntry>>>,
     analyses: Arc<Mutex<HashMap<u64, AnalysisEntry>>>,
+    plans: Arc<Mutex<HashMap<u64, String>>>,
     authorization: AuthorizationMode,
 }
 
@@ -45,6 +47,7 @@ impl Default for Helper {
             client: InProcessClient::new(),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             analyses: Arc::new(Mutex::new(HashMap::new())),
+            plans: Arc::new(Mutex::new(HashMap::new())),
             authorization: AuthorizationMode::PolicyKit,
         }
     }
@@ -66,7 +69,7 @@ impl Helper {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
     ) -> fdo::Result<u64> {
-        let owner = self.authorize(connection, &header).await?;
+        let owner = self.authorize(connection, &header, ACTION_READ_ALL).await?;
         let mut jobs = self
             .jobs
             .lock()
@@ -119,6 +122,8 @@ impl Helper {
             let terminal = matches!(
                 event,
                 ServiceEvent::AnalysisFinished { .. }
+                    | ServiceEvent::DefragFinished { .. }
+                    | ServiceEvent::DefragStopped { .. }
                     | ServiceEvent::JobCancelled { .. }
                     | ServiceEvent::Failed { .. }
             );
@@ -191,7 +196,51 @@ impl Helper {
             blocking::unblock(move || client.build_plan(AnalysisId(analysis_id), &policy))
                 .await
                 .map_err(failed)?;
+        self.plans
+            .lock()
+            .map_err(|_| failed("helper plan state was poisoned"))?
+            .insert(plan_id.0, owner);
         Ok((plan_id.0, serde_json::to_string(&summary).map_err(failed)?))
+    }
+
+    async fn start_defrag(
+        &self,
+        plan_id: u64,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> fdo::Result<u64> {
+        let owner = self.authorize(connection, &header, ACTION_MODIFY).await?;
+        let plan_owner = self
+            .plans
+            .lock()
+            .map_err(|_| failed("helper plan state was poisoned"))?
+            .remove(&plan_id)
+            .ok_or_else(|| fdo::Error::UnknownObject(format!("plan {plan_id} was not found")))?;
+        if plan_owner != owner {
+            return Err(fdo::Error::AccessDenied(
+                "the plan belongs to a different client".into(),
+            ));
+        }
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| failed("helper job state was poisoned"))?;
+        if jobs.values().any(|entry| entry.owner == owner) {
+            return Err(fdo::Error::LimitsExceeded(
+                "this client already has an active job".into(),
+            ));
+        }
+        let handle = self.client.start_defrag(PlanId(plan_id)).map_err(failed)?;
+        let job_id = handle.id().0;
+        jobs.insert(
+            job_id,
+            JobEntry {
+                owner,
+                handle,
+                last_polled: Instant::now(),
+            },
+        );
+        Ok(job_id)
     }
 }
 
@@ -210,9 +259,14 @@ impl Helper {
         }
     }
 
-    async fn authorize(&self, connection: &Connection, header: &Header<'_>) -> fdo::Result<String> {
+    async fn authorize(
+        &self,
+        connection: &Connection,
+        header: &Header<'_>,
+        action: &str,
+    ) -> fdo::Result<String> {
         match self.authorization {
-            AuthorizationMode::PolicyKit => authorize_policykit(connection, header).await,
+            AuthorizationMode::PolicyKit => authorize_policykit(connection, header, action).await,
             AuthorizationMode::TrustedPeer => Ok("development-peer".into()),
         }
     }
@@ -282,7 +336,11 @@ fn owned_job<'a>(
     Ok(entry)
 }
 
-async fn authorize_policykit(connection: &Connection, header: &Header<'_>) -> fdo::Result<String> {
+async fn authorize_policykit(
+    connection: &Connection,
+    header: &Header<'_>,
+    action: &str,
+) -> fdo::Result<String> {
     let owner = sender(header)?;
     let proxy = zbus::Proxy::new(
         connection,
@@ -298,21 +356,27 @@ async fn authorize_policykit(connection: &Connection, header: &Header<'_>) -> fd
     let mut details = HashMap::new();
     details.insert(
         "polkit.message",
-        "Authenticate to inspect all files on the selected disk",
+        if action == ACTION_MODIFY {
+            "Authenticate to modify file allocation on the selected disk"
+        } else {
+            "Authenticate to inspect all files on the selected disk"
+        },
     );
     details.insert("polkit.icon_name", "drive-harddisk");
     let (authorized, _, _): (bool, bool, HashMap<String, String>) = proxy
-        .call(
-            "CheckAuthorization",
-            &(subject, ACTION_READ_ALL, details, 1_u32, ""),
-        )
+        .call("CheckAuthorization", &(subject, action, details, 1_u32, ""))
         .await
         .map_err(failed)?;
     if authorized {
         Ok(owner)
     } else {
         Err(fdo::Error::AccessDenied(
-            "authorization to inspect all files was not granted".into(),
+            if action == ACTION_MODIFY {
+                "authorization to modify file allocation was not granted"
+            } else {
+                "authorization to inspect all files was not granted"
+            }
+            .into(),
         ))
     }
 }
