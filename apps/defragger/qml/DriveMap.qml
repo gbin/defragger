@@ -5,17 +5,19 @@ import org.kde.kirigami as Kirigami
 Item {
     id: root
 
-    property string mapJson: "[]"
+    property var mapData
     property double capacityBytes: 0
     property bool useAnalysis: false
     property int sourceRevision: 0
     property int renderedGeneration: 0
-    property var bins: []
+    property var mapView: null
+    property int binCount: 0
     property int hoveredIndex: -1
     property bool workerBusy: false
     property bool rebuildPending: false
     property bool geometryPending: false
     property int rebuildGeneration: 0
+    readonly property int recordBytes: 42
 
     signal rebuildRequested(
         real width,
@@ -66,44 +68,87 @@ Item {
         return number.toFixed(unit === 0 ? 0 : 1) + " " + units[unit]
     }
 
-    function metadataWinner(metadata) {
-        let winner = null
+    function field(index, fieldIndex) {
+        return mapView.getUint16(index * recordBytes + 16 + fieldIndex * 2, true)
+    }
+
+    function uint64(index, byteOffset) {
+        const offset = index * recordBytes + byteOffset
+        return mapView.getUint32(offset, true)
+            + mapView.getUint32(offset + 4, true) * 4294967296
+    }
+
+    function cellCategory(index) {
+        if (field(index, 2) > 0)
+            return 1
+        let winner = -1
+        let winnerValue = 0
         for (let i = 0; i < metadataTypes.length; ++i) {
-            const type = metadataTypes[i]
-            const value = metadata[type[0]] || 0
-            if (value > 0 && (!winner || value > winner.value))
-                winner = { value: value, label: type[1], color: type[2] }
+            const value = field(index, 4 + i)
+            if (value > winnerValue) {
+                winner = i
+                winnerValue = value
+            }
         }
-        return winner
+        if (winner >= 0)
+            return 2 + winner
+        if (field(index, 3) > 0)
+            return 11
+        if (field(index, 1) > 0)
+            return 12
+        return 0
     }
 
-    // One cell, one color. Fragmentation has the highest priority, followed
-    // by typed metadata, unknown allocation, normal data, and finally empty.
-    function cellStyle(bin) {
-        const mix = bin.mix
-        if ((mix.fragmented_data || 0) > 0)
-            return { label: qsTr("Fragmented data"), color: "#dc4f4a", coverage: mix.fragmented_data }
-        const metadata = metadataWinner(mix.metadata || ({}))
-        if (metadata)
-            return { label: metadata.label, color: metadata.color, coverage: metadata.value }
-        if ((mix.unscanned_data || 0) > 0)
-            return { label: qsTr("Not analyzed"), color: "#73777f", coverage: mix.unscanned_data }
-        if ((mix.contiguous_data || 0) > 0)
-            return { label: qsTr("Contiguous data"), color: "#35a853", coverage: mix.contiguous_data }
-        return { label: qsTr("Empty"), color: "#ffffff", coverage: 10000 }
+    function categoryLabel(category) {
+        if (category === 1)
+            return qsTr("Fragmented data")
+        if (category >= 2 && category <= 10)
+            return metadataTypes[category - 2][1]
+        if (category === 11)
+            return qsTr("Not analyzed")
+        if (category === 12)
+            return qsTr("Contiguous data")
+        return qsTr("Empty")
     }
 
-    function displayColor(style) {
-        if (style.label === qsTr("Empty"))
-            return style.color
+    function categoryColor(category) {
+        if (category === 1)
+            return "#dc4f4a"
+        if (category >= 2 && category <= 10)
+            return metadataTypes[category - 2][2]
+        if (category === 11)
+            return "#73777f"
+        if (category === 12)
+            return "#35a853"
+        return "#ffffff"
+    }
+
+    function categoryCoverage(index, category) {
+        if (category === 1)
+            return field(index, 2)
+        if (category >= 2 && category <= 10)
+            return field(index, category + 2)
+        if (category === 11)
+            return field(index, 3)
+        if (category === 12)
+            return field(index, 1)
+        return 10000
+    }
+
+    function displayColor(index) {
+        const category = cellCategory(index)
+        const color = categoryColor(category)
+        if (category === 0)
+            return color
         // Keep a partially occupied category identifiable while making it
         // visibly lighter. Exact percentages remain available on hover.
-        const occupied = Math.max(0, Math.min(1, style.coverage / 10000))
-        return Qt.lighter(style.color, 1 + (1 - occupied) * 0.35)
+        const occupied = Math.max(0, Math.min(1,
+            categoryCoverage(index, category) / 10000))
+        return Qt.lighter(color, 1 + (1 - occupied) * 0.35)
     }
 
     function grid(width, height) {
-        const count = Math.max(1, bins.length)
+        const count = Math.max(1, binCount)
         const gap = 2
         const cell = 9
         const columns = Math.max(1, Math.floor((width + gap) / (cell + gap)))
@@ -146,34 +191,34 @@ Item {
         )
     }
 
-    function detailText(bin) {
-        if (!bin)
+    function detailText(index) {
+        if (!mapView || index < 0 || index >= binCount)
             return ""
-        const style = cellStyle(bin)
-        const start = bin.offset_bytes
-        const end = start + bin.length_bytes
+        const category = cellCategory(index)
+        const start = uint64(index, 0)
+        const length = uint64(index, 8)
+        const end = start + length
         const lines = [
-            style.label + qsTr(" (display priority)"),
+            categoryLabel(category) + qsTr(" (display priority)"),
             bytes(start) + " – " + bytes(end),
-            qsTr("Cell span: %1").arg(bytes(bin.length_bytes))
+            qsTr("Cell span: %1").arg(bytes(length))
         ]
-        const mix = bin.mix
         const append = function(label, value) {
             if ((value || 0) > 0)
                 lines.push(label + ": " + percent(value))
         }
-        append(qsTr("Fragmented data"), mix.fragmented_data)
-        append(qsTr("Contiguous data"), mix.contiguous_data)
-        append(qsTr("Not analyzed"), mix.unscanned_data)
+        append(qsTr("Fragmented data"), field(index, 2))
+        append(qsTr("Contiguous data"), field(index, 1))
+        append(qsTr("Not analyzed"), field(index, 3))
         for (let i = 0; i < metadataTypes.length; ++i) {
             const type = metadataTypes[i]
-            append(type[1], (mix.metadata || ({}))[type[0]])
+            append(type[1], field(index, 4 + i))
         }
-        let described = (mix.free || 0) + (mix.fragmented_data || 0)
-            + (mix.contiguous_data || 0) + (mix.unscanned_data || 0)
+        let described = field(index, 0) + field(index, 1)
+            + field(index, 2) + field(index, 3)
         for (let i = 0; i < metadataTypes.length; ++i)
-            described += (mix.metadata || ({}))[metadataTypes[i][0]] || 0
-        append(qsTr("Empty"), Math.min(10000, (mix.free || 0) + Math.max(0, 10000 - described)))
+            described += field(index, 4 + i)
+        append(qsTr("Empty"), Math.min(10000, field(index, 0) + Math.max(0, 10000 - described)))
         return lines.join("\n")
     }
 
@@ -200,13 +245,16 @@ Item {
             return
         }
         try {
-            bins = JSON.parse(mapJson)
-        } catch (_) {
-            bins = []
+            mapView = new DataView(mapData)
+            binCount = Math.floor(mapView.byteLength / recordBytes)
+        } catch (error) {
+            console.warn("Could not read drive map buffer:", error)
+            mapView = null
+            binCount = 0
         }
         geometryPending = false
     }
-    onBinsChanged: canvas.requestPaint()
+    onBinCountChanged: canvas.requestPaint()
 
     Component.onCompleted: requestRebuild(true)
 
@@ -241,16 +289,15 @@ Item {
         onPaint: {
             const ctx = getContext("2d")
             ctx.reset()
-            if (root.bins.length === 0)
+            if (!root.mapView || root.binCount === 0)
                 return
             const layout = root.grid(width, height)
-            for (let i = 0; i < root.bins.length; ++i) {
+            for (let i = 0; i < root.binCount; ++i) {
                 const column = i % layout.columns
                 const row = Math.floor(i / layout.columns)
                 const x = layout.x + column * (layout.cell + layout.gap)
                 const y = layout.y + row * (layout.cell + layout.gap)
-                const style = root.cellStyle(root.bins[i])
-                ctx.fillStyle = root.displayColor(style)
+                ctx.fillStyle = root.displayColor(i)
                 ctx.fillRect(x, y, layout.cell, layout.cell)
                 ctx.strokeStyle = i === root.hoveredIndex
                     ? Kirigami.Theme.highlightedTextColor
@@ -279,13 +326,27 @@ Item {
                     && localY % (layout.cell + layout.gap) < layout.cell
                 const index = row * layout.columns + column
                 root.hoveredIndex = insideCell && column >= 0 && row >= 0
-                    && column < layout.columns && index < root.bins.length ? index : -1
+                    && column < layout.columns && index < root.binCount ? index : -1
                 canvas.requestPaint()
             }
-            Controls.ToolTip.visible: containsMouse && root.hoveredIndex >= 0
-            Controls.ToolTip.delay: Kirigami.Units.toolTipDelay
-            Controls.ToolTip.text: root.hoveredIndex >= 0
-                ? root.detailText(root.bins[root.hoveredIndex]) : ""
+            Controls.ToolTip {
+                id: hoverTip
+                visible: hoverArea.containsMouse && root.hoveredIndex >= 0
+                delay: Kirigami.Units.toolTipDelay
+                timeout: -1
+                text: root.hoveredIndex >= 0
+                    ? root.detailText(root.hoveredIndex) : ""
+                x: Math.max(0, Math.min(
+                    hoverArea.width - width,
+                    hoverArea.mouseX + 14
+                ))
+                y: Math.max(0, Math.min(
+                    hoverArea.height - height,
+                    hoverArea.mouseY + height + 18 <= hoverArea.height
+                        ? hoverArea.mouseY + 18
+                        : hoverArea.mouseY - height - 12
+                ))
+            }
         }
     }
 

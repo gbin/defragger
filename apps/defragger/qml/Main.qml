@@ -13,17 +13,11 @@ Kirigami.ApplicationWindow {
     visible: true
     title: qsTr("Defragger")
 
-    property var volumes: []
-    property var report: ({})
-    property var plan: ({})
     property int selectedIndex: -1
-    property string mapVolumeId: ""
-    readonly property var selectedVolume: selectedIndex >= 0 && selectedIndex < volumes.length
-        ? volumes[selectedIndex] : null
-
-    function parseOr(value, fallback) {
-        try { return JSON.parse(value) } catch (_) { return fallback }
-    }
+    readonly property bool hasSelectedVolume: selectedIndex >= 0
+        && selectedIndex < controller.volume_count
+    readonly property string selectedVolumeId: hasSelectedVolume
+        ? String(controller.volume_id(selectedIndex)) : ""
     function bytes(value) {
         if (!value) return "0 B"
         const units = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -33,23 +27,19 @@ Kirigami.ApplicationWindow {
         return number.toFixed(unit === 0 ? 0 : 1) + " " + units[unit]
     }
     function percent(basisPoints) {
-        return basisPoints === undefined || basisPoints === null ? "—" : (basisPoints / 100).toFixed(1) + "%"
+        return basisPoints === undefined || basisPoints === null || basisPoints < 0
+            ? "—" : (basisPoints / 100).toFixed(1) + "%"
     }
-    function supportText(support) {
-        return support === "ReadOnly" ? qsTr("Analyze") : qsTr("Unsupported")
-    }
-
     Controller {
         id: controller
-        onVolumes_jsonChanged: {
-            window.volumes = window.parseOr(volumes_json, [])
-            if (window.selectedIndex < 0 && window.volumes.length > 0)
+        onVolume_countChanged: {
+            if (window.selectedIndex < 0 && volume_count > 0)
                 window.selectedIndex = 0
+            else if (window.selectedIndex >= volume_count)
+                window.selectedIndex = volume_count - 1
         }
-        onReport_jsonChanged: window.report = window.parseOr(report_json, ({}))
-        onPlan_jsonChanged: {
-            window.plan = window.parseOr(plan_json, ({}))
-            if (window.plan.candidates !== undefined)
+        onPlan_revisionChanged: {
+            if (plan_revision > 0)
                 planDialog.open()
         }
     }
@@ -76,10 +66,8 @@ Kirigami.ApplicationWindow {
     }
 
     function analyzeSelected() {
-        if (selectedVolume) {
-            mapVolumeId = String(selectedVolume.id)
-            controller.analyze(mapVolumeId)
-        }
+        if (hasSelectedVolume)
+            controller.analyze(selectedVolumeId)
     }
 
     ColumnLayout {
@@ -102,10 +90,12 @@ Kirigami.ApplicationWindow {
                     anchors.fill: parent
                     anchors.margins: 1
                     clip: true
-                    model: window.volumes
+                    model: controller.volume_count
                     delegate: Rectangle {
-                        required property var modelData
                         required property int index
+                        readonly property string volumeId: controller.volume_id(index)
+                        readonly property double capacityBytes: controller.volume_capacity_bytes(index)
+                        readonly property double usedBytes: controller.volume_used_bytes(index)
                         width: volumeList.width
                         height: 38
                         color: window.selectedIndex === index ? Kirigami.Theme.highlightColor : (index % 2 ? Kirigami.Theme.alternateBackgroundColor : Kirigami.Theme.backgroundColor)
@@ -114,11 +104,11 @@ Kirigami.ApplicationWindow {
                             anchors.leftMargin: 10; anchors.rightMargin: 10
                             spacing: 8
                             Kirigami.Icon { source: "drive-harddisk"; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
-                            Controls.Label { text: modelData.mount_point + "  (" + modelData.source + ")"; elide: Text.ElideMiddle; Layout.preferredWidth: 200 }
-                            Controls.Label { text: modelData.filesystem; Layout.preferredWidth: 80 }
-                            Controls.Label { text: window.bytes(modelData.capacity_bytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
-                            Controls.Label { text: window.bytes(modelData.used_bytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
-                            Controls.Label { text: window.bytes(modelData.free_bytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
+                            Controls.Label { text: controller.volume_mount_point(index) + "  (" + controller.volume_source(index) + ")"; elide: Text.ElideMiddle; Layout.preferredWidth: 200 }
+                            Controls.Label { text: controller.volume_filesystem(index); Layout.preferredWidth: 80 }
+                            Controls.Label { text: window.bytes(capacityBytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
+                            Controls.Label { text: window.bytes(usedBytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
+                            Controls.Label { text: window.bytes(controller.volume_free_bytes(index)); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
                             Item {
                                 Layout.preferredWidth: 120
                                 Layout.preferredHeight: 16
@@ -130,26 +120,28 @@ Kirigami.ApplicationWindow {
                                     border.color: Kirigami.Theme.disabledTextColor
                                     Rectangle {
                                         height: parent.height
-                                        width: parent.width * (modelData.capacity_bytes > 0 ? modelData.used_bytes / modelData.capacity_bytes : 0)
+                                        width: parent.width * (capacityBytes > 0 ? usedBytes / capacityBytes : 0)
                                         radius: parent.radius
                                         color: Kirigami.Theme.highlightColor
                                     }
                                 }
                                 Controls.Label {
                                     anchors.centerIn: parent
-                                    text: modelData.capacity_bytes > 0 ? Math.round(modelData.used_bytes * 100 / modelData.capacity_bytes) + "%" : "—"
+                                    text: capacityBytes > 0 ? Math.round(usedBytes * 100 / capacityBytes) + "%" : "—"
                                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                                 }
                             }
                             Controls.Label {
-                                text: window.report.volume && window.report.volume.id === modelData.id ? window.percent(window.report.fragmentation.fragmented_basis_points) : "—"
+                                text: controller.has_report
+                                    && controller.report_volume_id === volumeId
+                                    ? window.percent(controller.fragmented_basis_points) : "—"
                                 Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight
                             }
-                            Controls.Label { text: controller.busy && window.selectedIndex === index ? qsTr("Analyzing…") : window.supportText(modelData.support); Layout.fillWidth: true }
+                            Controls.Label { text: controller.busy && window.selectedIndex === index ? qsTr("Analyzing…") : (controller.volume_supported(index) ? qsTr("Analyze") : qsTr("Unsupported")); Layout.fillWidth: true }
                         }
                         MouseArea { anchors.fill: parent; onClicked: window.selectedIndex = index; onDoubleClicked: window.analyzeSelected() }
                     }
-                    Kirigami.PlaceholderMessage { anchors.centerIn: parent; visible: volumeList.count === 0; text: qsTr("No disk volumes found") }
+                    Kirigami.PlaceholderMessage { anchors.centerIn: parent; visible: controller.volume_count === 0; text: qsTr("No disk volumes found") }
                 }
             }
         }
@@ -158,11 +150,12 @@ Kirigami.ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 100
-            capacityBytes: window.selectedVolume ? window.selectedVolume.capacity_bytes : 0
-            useAnalysis: window.selectedVolume
-                && String(window.selectedVolume.id) === window.mapVolumeId
+            capacityBytes: window.hasSelectedVolume
+                ? controller.volume_capacity_bytes(window.selectedIndex) : 0
+            useAnalysis: window.hasSelectedVolume
+                && window.selectedVolumeId === String(controller.map_volume_id)
             sourceRevision: useAnalysis ? controller.map_revision : 0
-            mapJson: controller.display_map_json
+            mapData: controller.display_map_data
             renderedGeneration: controller.display_map_generation
             onRebuildRequested: function(width, height, capacity, analysis, generation) {
                 controller.render_map(width, height, capacity, analysis, generation)
@@ -187,7 +180,7 @@ Kirigami.ApplicationWindow {
                 color: Kirigami.Theme.backgroundColor; border.color: Kirigami.Theme.disabledTextColor; border.width: 1
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: Kirigami.Units.largeSpacing
-                    Controls.Label { text: controller.busy ? qsTr("Analysis in progress") : (window.report.volume ? qsTr("Analysis complete") : qsTr("Ready")); font.bold: true }
+                    Controls.Label { text: controller.busy ? qsTr("Analysis in progress") : (controller.has_report ? qsTr("Analysis complete") : qsTr("Ready")); font.bold: true }
                     Controls.Label {
                         visible: text.length > 0
                         text: controller.status
@@ -197,29 +190,33 @@ Kirigami.ApplicationWindow {
                     RowLayout {
                         Controls.Label { text: qsTr("Files scanned: %1").arg(Math.floor(controller.files_scanned).toLocaleString()) }
                         Controls.Label { text: qsTr("Allocated data scanned: %1").arg(window.bytes(controller.bytes_scanned)) }
-                        Controls.Label { visible: window.report.coverage !== undefined; text: qsTr("Coverage: %1 · %2 skipped").arg(window.report.coverage ? window.percent(window.report.coverage.estimated_basis_points) : "—").arg(window.report.coverage ? window.report.coverage.skipped_entries : 0) }
+                        Controls.Label { visible: controller.has_report; text: qsTr("Coverage: %1 · %2 skipped").arg(window.percent(controller.coverage_basis_points)).arg(Math.floor(controller.skipped_entries).toLocaleString()) }
                         Item { Layout.fillWidth: true }
-                        Controls.Label { text: window.report.fragmentation ? qsTr("Fragmented scanned data: %1").arg(window.percent(window.report.fragmentation.fragmented_basis_points)) : qsTr("Fragmentation: not analyzed") }
+                        Controls.Label { text: controller.has_report ? qsTr("Fragmented scanned data: %1").arg(window.percent(controller.fragmented_basis_points)) : qsTr("Fragmentation: not analyzed") }
                     }
                 }
             }
 
             ListView {
+                id: fileList
                 clip: true
-                model: window.report.files || []
+                model: controller.file_row_count
                 delegate: Controls.ItemDelegate {
-                    required property var modelData
+                    required property int index
                     width: ListView.view.width
-                    text: modelData.path + "    " + qsTr("%1 runs (%2 excess)").arg(modelData.physical_runs).arg(modelData.excess_runs)
+                    text: controller.file_path(index) + "    "
+                        + qsTr("%1 runs (%2 excess)")
+                            .arg(controller.file_physical_runs(index))
+                            .arg(controller.file_excess_runs(index))
                 }
-                Kirigami.PlaceholderMessage { anchors.centerIn: parent; visible: parent.count === 0; text: qsTr("Analyze a volume to inspect fragmented files") }
+                Kirigami.PlaceholderMessage { anchors.centerIn: parent; visible: fileList.count === 0; text: qsTr("Analyze a volume to inspect fragmented files") }
             }
         }
 
         RowLayout {
             Layout.fillWidth: true
             Controls.Button { text: qsTr("Analyze"); icon.name: "system-search"; enabled: window.selectedIndex >= 0 && !controller.busy; onClicked: window.analyzeSelected() }
-            Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && window.report.volume !== undefined; onClicked: controller.build_plan() }
+            Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && controller.has_report; onClicked: controller.build_plan() }
             Item { Layout.preferredWidth: Kirigami.Units.largeSpacing }
             Controls.Button { text: controller.paused ? qsTr("Resume") : qsTr("Pause"); enabled: controller.busy; onClicked: controller.paused ? controller.resume() : controller.pause() }
             Controls.Button { text: qsTr("Stop"); icon.name: "process-stop"; enabled: controller.busy; onClicked: controller.stop() }
@@ -239,11 +236,17 @@ Kirigami.ApplicationWindow {
         ColumnLayout {
             anchors.fill: parent
             Controls.Label { text: qsTr("Read-only v0 — no extents will be moved"); font.bold: true; color: Kirigami.Theme.neutralTextColor }
-            Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(window.plan.candidates ? window.plan.candidates.length : 0).arg(window.bytes(window.plan.estimated_rewrite_bytes)); wrapMode: Text.Wrap }
+            Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(controller.plan_candidate_count).arg(window.bytes(controller.plan_estimated_rewrite_bytes)); wrapMode: Text.Wrap }
             ListView {
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true
-                model: window.plan.candidates || []
-                delegate: Controls.ItemDelegate { required property var modelData; width: ListView.view.width; text: modelData.path + "  " + modelData.current_runs + " → " + modelData.target_runs + " runs" }
+                model: controller.plan_candidate_count
+                delegate: Controls.ItemDelegate {
+                    required property int index
+                    width: ListView.view.width
+                    text: controller.plan_candidate_path(index) + "  "
+                        + controller.plan_candidate_current_runs(index) + " → "
+                        + controller.plan_candidate_target_runs(index) + " runs"
+                }
             }
         }
     }
