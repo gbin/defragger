@@ -36,6 +36,18 @@ Kirigami.ApplicationWindow {
         return basisPoints === undefined || basisPoints === null || basisPoints < 0
             ? "—" : (basisPoints / 100).toFixed(1) + "%"
     }
+    function integer(value) {
+        if (!isFinite(value) || value < 0)
+            return "0"
+        const digits = Math.floor(value).toFixed(0)
+        let grouped = ""
+        for (let index = 0; index < digits.length; ++index) {
+            if (index > 0 && (digits.length - index) % 3 === 0)
+                grouped += "'"
+            grouped += digits[index]
+        }
+        return grouped
+    }
     Controller {
         id: controller
         onVolume_countChanged: {
@@ -187,19 +199,50 @@ Kirigami.ApplicationWindow {
                 color: Kirigami.Theme.backgroundColor; border.color: Kirigami.Theme.disabledTextColor; border.width: 1
                 ColumnLayout {
                     anchors.fill: parent; anchors.margins: Kirigami.Units.largeSpacing
-                    Controls.Label { text: window.selectedIsBeingAnalyzed ? qsTr("Analysis in progress") : (window.selectedHasReport ? qsTr("Analysis complete") : qsTr("Ready")); font.bold: true }
-                    Controls.Label {
-                        visible: window.selectedIsBeingAnalyzed && text.length > 0
-                        text: window.selectedIsBeingAnalyzed ? controller.status : ""
-                        elide: Text.ElideMiddle
+                    RowLayout {
                         Layout.fillWidth: true
+                        Controls.Label {
+                            text: window.selectedIsBeingAnalyzed ? qsTr("Analysis in progress") : (window.selectedHasReport ? qsTr("Analysis complete") : qsTr("Ready"))
+                            font.bold: true
+                        }
+                        Controls.Label {
+                            Layout.fillWidth: true
+                            visible: window.selectedIsBeingAnalyzed && text.length > 0
+                            text: window.selectedIsBeingAnalyzed ? controller.status : ""
+                            elide: Text.ElideMiddle
+                            horizontalAlignment: Text.AlignRight
+                            color: Kirigami.Theme.disabledTextColor
+                        }
                     }
                     RowLayout {
-                        Controls.Label { text: qsTr("Files scanned: %1").arg(window.selectedHasReport || window.selectedIsBeingAnalyzed ? Math.floor(controller.files_scanned).toLocaleString() : "0") }
-                        Controls.Label { text: qsTr("Allocated data scanned: %1").arg(window.bytes(window.selectedHasReport || window.selectedIsBeingAnalyzed ? controller.bytes_scanned : 0)) }
-                        Controls.Label { visible: window.selectedHasReport; text: qsTr("Coverage: %1 · %2 skipped").arg(window.percent(controller.coverage_basis_points)).arg(Math.floor(controller.skipped_entries).toLocaleString()) }
-                        Item { Layout.fillWidth: true }
-                        Controls.Label { text: window.selectedHasReport ? qsTr("Fragmented scanned data: %1").arg(window.percent(controller.fragmented_basis_points)) : qsTr("Fragmentation: not analyzed") }
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        spacing: Kirigami.Units.largeSpacing
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Controls.Label { text: qsTr("Files scanned"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
+                            Controls.Label { text: window.integer(window.selectedHasReport || window.selectedIsBeingAnalyzed ? controller.files_scanned : 0); font.bold: true }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Controls.Label { text: qsTr("Allocated data"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
+                            Controls.Label { text: window.bytes(window.selectedHasReport || window.selectedIsBeingAnalyzed ? controller.bytes_scanned : 0); font.bold: true }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Controls.Label { text: qsTr("Coverage"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
+                            Controls.Label { text: window.selectedHasReport ? window.percent(controller.coverage_basis_points) : "—"; font.bold: true }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Controls.Label { text: qsTr("Skipped"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
+                            Controls.Label { text: window.selectedHasReport ? window.integer(controller.skipped_entries) : "—"; font.bold: true }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Controls.Label { text: qsTr("Fragmented data"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
+                            Controls.Label { text: window.selectedHasReport ? window.percent(controller.fragmented_basis_points) : qsTr("Not analyzed"); font.bold: true }
+                        }
                     }
                 }
             }
@@ -243,7 +286,7 @@ Kirigami.ApplicationWindow {
         ColumnLayout {
             anchors.fill: parent
             Controls.Label { text: qsTr("Read-only v0 — no extents will be moved"); font.bold: true; color: Kirigami.Theme.neutralTextColor }
-            Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(controller.plan_candidate_count).arg(window.bytes(controller.plan_estimated_rewrite_bytes)); wrapMode: Text.Wrap }
+            Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(window.integer(controller.plan_candidate_count)).arg(window.bytes(controller.plan_estimated_rewrite_bytes)); wrapMode: Text.Wrap }
             ListView {
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                 model: controller.plan_candidate_count
