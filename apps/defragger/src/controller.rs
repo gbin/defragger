@@ -67,9 +67,11 @@ mod qobject {
         #[qinvokable]
         fn map_file_path(self: &Controller, index: i32) -> QString;
         #[qinvokable]
-        fn file_physical_runs(self: &Controller, index: i32) -> i32;
+        fn file_size_bytes(self: &Controller, index: i32) -> f64;
         #[qinvokable]
-        fn file_excess_runs(self: &Controller, index: i32) -> i32;
+        fn file_fragment_count(self: &Controller, index: i32) -> i32;
+        #[qinvokable]
+        fn file_average_fragment_bytes(self: &Controller, index: i32) -> f64;
         #[qinvokable]
         fn plan_candidate_path(self: &Controller, index: i32) -> QString;
         #[qinvokable]
@@ -529,14 +531,19 @@ impl qobject::Controller {
             })
     }
 
-    fn file_physical_runs(&self, index: i32) -> i32 {
+    fn file_size_bytes(&self, index: i32) -> f64 {
+        self.file_row(index)
+            .map_or(0.0, |file| file.logical_bytes as f64)
+    }
+
+    fn file_fragment_count(&self, index: i32) -> i32 {
         self.file_row(index)
             .map_or(0, |file| count_i32(file.physical_runs as usize))
     }
 
-    fn file_excess_runs(&self, index: i32) -> i32 {
+    fn file_average_fragment_bytes(&self, index: i32) -> f64 {
         self.file_row(index)
-            .map_or(0, |file| count_i32(file.excess_runs as usize))
+            .map_or(0.0, |file| file.average_run_bytes as f64)
     }
 
     fn plan_candidate_path(&self, index: i32) -> QString {

@@ -260,19 +260,99 @@ Kirigami.ApplicationWindow {
                 }
             }
 
-            ListView {
-                id: fileList
-                clip: true
-                model: window.selectedHasReport ? controller.file_row_count : 0
-                delegate: Controls.ItemDelegate {
-                    required property int index
-                    width: ListView.view.width
-                    text: controller.file_path(index) + "    "
-                        + qsTr("%1 runs (%2 excess)")
-                            .arg(controller.file_physical_runs(index))
-                            .arg(controller.file_excess_runs(index))
+            ColumnLayout {
+                id: fileTable
+                readonly property int sizeColumnWidth: 100
+                readonly property int fragmentColumnWidth: 100
+                readonly property int averageColumnWidth: 180
+                readonly property int columnSpacing: Kirigami.Units.largeSpacing * 2
+                spacing: 0
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 28
+                    color: Kirigami.Theme.alternateBackgroundColor
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: fileTable.columnSpacing
+
+                        Controls.Label {
+                            Layout.fillWidth: true
+                            text: qsTr("File")
+                            font.bold: true
+                        }
+                        Controls.Label {
+                            Layout.preferredWidth: fileTable.sizeColumnWidth
+                            text: qsTr("Size")
+                            font.bold: true
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Controls.Label {
+                            Layout.preferredWidth: fileTable.fragmentColumnWidth
+                            text: qsTr("Fragments")
+                            font.bold: true
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Controls.Label {
+                            Layout.preferredWidth: fileTable.averageColumnWidth
+                            text: qsTr("Fragment size (avg)")
+                            font.bold: true
+                            horizontalAlignment: Text.AlignRight
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 1
+                        color: Kirigami.Theme.disabledTextColor
+                    }
                 }
-                Kirigami.PlaceholderMessage { anchors.centerIn: parent; visible: fileList.count === 0; text: qsTr("Analyze a volume to inspect fragmented files") }
+
+                ListView {
+                    id: fileList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: window.selectedHasReport ? controller.file_row_count : 0
+                    delegate: Controls.ItemDelegate {
+                        required property int index
+                        width: ListView.view.width
+
+                        contentItem: RowLayout {
+                            spacing: fileTable.columnSpacing
+                            Controls.Label {
+                                Layout.fillWidth: true
+                                text: controller.file_path(index)
+                                elide: Text.ElideMiddle
+                            }
+                            Controls.Label {
+                                Layout.preferredWidth: fileTable.sizeColumnWidth
+                                text: window.bytes(controller.file_size_bytes(index))
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            Controls.Label {
+                                Layout.preferredWidth: fileTable.fragmentColumnWidth
+                                text: window.integer(controller.file_fragment_count(index))
+                                horizontalAlignment: Text.AlignRight
+                            }
+                            Controls.Label {
+                                Layout.preferredWidth: fileTable.averageColumnWidth
+                                text: window.bytes(controller.file_average_fragment_bytes(index))
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+                    Kirigami.PlaceholderMessage {
+                        anchors.centerIn: parent
+                        visible: fileList.count === 0
+                        text: qsTr("Analyze a volume to inspect fragmented files")
+                    }
+                }
             }
         }
 
