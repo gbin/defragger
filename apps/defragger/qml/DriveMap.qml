@@ -44,11 +44,14 @@ Item {
         ["other", qsTr("Other metadata"), "#a56cc1"]
     ]
 
-    readonly property var legendTypes: [
+    readonly property var dataLegendTypes: [
         [qsTr("Empty"), "#ffffff"],
         [qsTr("Data"), "#35a853"],
         [qsTr("Fragmented"), "#dc4f4a"],
-        [qsTr("Not analyzed"), "#73777f"],
+        [qsTr("Not analyzed"), "#73777f"]
+    ]
+
+    readonly property var metadataLegendTypes: [
         [qsTr("FS headers"), "#8e62d9"],
         [qsTr("Journal"), "#e89b42"],
         [qsTr("Allocation table"), "#26a69a"],
@@ -504,30 +507,71 @@ Item {
         }
     }
 
-    Flow {
+    Item {
         id: legend
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
-        anchors.margins: Kirigami.Units.smallSpacing
-        height: 43
-        spacing: Kirigami.Units.smallSpacing
-        Repeater {
-            model: root.legendTypes
-            delegate: Row {
+        anchors.leftMargin: Kirigami.Units.largeSpacing * 2
+        anchors.rightMargin: Kirigami.Units.largeSpacing
+        anchors.bottomMargin: Kirigami.Units.smallSpacing
+        height: legendRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+
+        Component {
+            id: legendEntry
+
+            RowLayout {
                 required property var modelData
-                spacing: 3
+                spacing: Kirigami.Units.smallSpacing
+
                 Rectangle {
-                    width: 10
-                    height: 10
+                    Layout.preferredWidth: 11
+                    Layout.preferredHeight: 11
+                    Layout.alignment: Qt.AlignVCenter
                     radius: 2
                     color: modelData[1]
                     border.color: "#34383d"
                     border.width: 1
                 }
                 Controls.Label {
+                    Layout.alignment: Qt.AlignVCenter
                     text: modelData[0]
                     font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                }
+            }
+        }
+
+        RowLayout {
+            id: legendRow
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Kirigami.Units.largeSpacing * 2
+
+            RowLayout {
+                Layout.alignment: Qt.AlignVCenter
+                spacing: Kirigami.Units.largeSpacing * 2
+                Repeater {
+                    model: root.dataLegendTypes
+                    delegate: legendEntry
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 1
+                Layout.preferredHeight: metadataLegend.implicitHeight
+                Layout.alignment: Qt.AlignVCenter
+                color: Kirigami.Theme.disabledTextColor
+            }
+
+            Flow {
+                id: metadataLegend
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignVCenter
+                spacing: Kirigami.Units.largeSpacing
+                Repeater {
+                    model: root.metadataLegendTypes
+                    delegate: legendEntry
                 }
             }
         }
