@@ -1,10 +1,42 @@
 # Architecture and privilege boundary
 
-The GUI talks only in `ServiceRequest` and `ServiceEvent` domain messages. The v0
-`InProcessClient` dispatches those messages to the same-process service, but the
-filesystem backend does not depend on Qt or on that transport.
+The filesystem backends do not depend on Qt or on a transport. Three build
+modes select how the GUI reaches the same service API:
 
-## v0 read path
+- The default Cargo build uses `DevelopmentClient`. It asks systemd, through
+  PolicyKit, to launch the current GUI executable as a transient root service
+  in a hidden helper mode. The two processes use a private peer-to-peer D-Bus
+  connection, so no development files need to be installed.
+- `--no-default-features` selects `InProcessClient`, an explicit unprivileged
+  fallback for systems without systemd or a graphical PolicyKit agent.
+- The `system-helper` GUI feature uses the system D-Bus client. CMake enables
+  this feature and builds the separate privileged helper for installation.
+
+Both modes deliver the same `ServiceEvent` domain messages to the controller,
+so pause, resume, cancellation, live maps, reports, and plan previews follow one
+UI code path.
+
+The development peer connection also owns the transient helper's lifetime.
+Closing or crashing the GUI closes the socket; the helper waits for that close,
+then exits, and systemd's `--collect` removes the stopped transient unit.
+
+## Privileged read path
+
+The GUI obtains the volume list from an unprivileged helper method so that the
+mount IDs come from the helper's hardened mount namespace. When the user
+presses Analyze, it calls `io.github.defragger.Helper1.StartAnalysis` on the
+system bus with the interactive-authentication flag. The root-owned helper asks
+PolicyKit to check the calling connection for
+`io.github.defragger.read-all-files`; the desktop's PolicyKit agent owns all
+password UI. Jobs and completed analyses are bound to that unique D-Bus caller,
+and every later operation verifies the owner. A client can own only one active
+job, abandoned jobs are cancelled, and unused completed analyses expire.
+
+The helper receives only a mount ID. It discovers and validates the selected
+mount itself, streams serialized domain events to the GUI, and supports pause,
+resume, cancellation, and read-only plan construction. The GUI never passes a
+path, file descriptor, physical offset, or command to execute across the
+privilege boundary.
 
 - Mount discovery reads `/proc/self/mountinfo` and uses `statvfs(3)`.
 - ext4's physical allocation map comes from `FS_IOC_GETFSMAP`.
@@ -14,8 +46,10 @@ filesystem backend does not depend on Qt or on that transport.
   does not provide their filesystem-wide allocation map, so unobserved space
   remains unknown and those reports are marked partial.
 - `statx(2)` mount IDs keep traversal inside the selected mount.
-- No executable is spawned. Inaccessible files are counted and make the report
-  explicitly partial.
+- No filesystem utility or shell command is spawned. Development mode invokes
+  only `systemd-run` to establish the privilege boundary. Entries that remain
+  inaccessible or cannot be mapped are counted and make the report explicitly
+  partial.
 
 The backend maintains 4,096 physical-range bins. The GUI reevaluates its tile
 count from the available pixel area and combines adjacent bins to fill the map
@@ -35,12 +69,10 @@ writer will publish the same events before and after extent moves.
 
 ## Future privileged write path
 
-The Plasma GUI must never run as root. A separately installed, narrowly scoped
-system service will expose the same protocol over D-Bus and use Polkit for
-authorization. Read-all-files and move-extents actions should have separate
-Polkit actions. The helper will reopen and revalidate every path and extent; it
-must not trust file descriptors, physical offsets, or eligibility decisions
-supplied by the GUI.
+The Plasma GUI must never run as root. Any future move-extents API must use a
+separate PolicyKit action. The helper will reopen and revalidate every path and
+extent; it must not trust file descriptors, physical offsets, or eligibility
+decisions supplied by the GUI.
 
 The ext4 writer will use `EXT4_IOC_MOVE_EXT` and donor files directly. It will
 require a mounted read-write filesystem and authorization. There is deliberately

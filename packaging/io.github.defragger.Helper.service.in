@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=io.github.defragger.Helper
+Exec=@CMAKE_INSTALL_FULL_LIBEXECDIR@/defragger-helper
+User=root
+SystemdService=defragger-helper.service

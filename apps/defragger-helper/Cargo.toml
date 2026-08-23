@@ -1,0 +1,21 @@
+[package]
+name = "defragger-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/main.rs"
+
+[[bin]]
+name = "defragger-helper"
+path = "src/bin.rs"
+
+[dependencies]
+blocking = "1.6.2"
+defrag-domain = { path = "../../crates/defrag-domain" }
+defrag-service = { path = "../../crates/defrag-service" }
+futures-lite = "2.6.1"
+serde_json.workspace = true
+zbus.workspace = true

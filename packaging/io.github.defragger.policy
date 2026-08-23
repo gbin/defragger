@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+<policyconfig>
+  <vendor>Defragger</vendor>
+  <vendor_url>https://github.com/gbin/defragger</vendor_url>
+  <icon_name>drive-harddisk</icon_name>
+
+  <action id="io.github.defragger.read-all-files">
+    <description>Analyze all files on a disk</description>
+    <message>Authentication is required to inspect all files on disks</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

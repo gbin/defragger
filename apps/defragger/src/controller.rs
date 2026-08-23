@@ -98,7 +98,12 @@ use defrag_domain::{
     AnalysisId, AnalysisReport, CategoryMix, DefragPolicy, FileReport, MapBin, MetadataMix,
     PlanCandidate, ServiceEvent, SupportStatus, Volume, VolumeId,
 };
-use defrag_service::InProcessClient;
+#[cfg(all(feature = "development-service", not(feature = "system-helper")))]
+use defrag_service::DevelopmentClient as AppClient;
+#[cfg(all(not(feature = "development-service"), not(feature = "system-helper")))]
+use defrag_service::InProcessClient as AppClient;
+#[cfg(feature = "system-helper")]
+use defrag_service::PrivilegedClient as AppClient;
 
 const MAP_RECORD_BYTES: usize = 42;
 
@@ -158,7 +163,7 @@ pub struct ControllerRust {
     bytes_scanned: f64,
     skipped_entries: f64,
     plan_estimated_rewrite_bytes: f64,
-    client: InProcessClient,
+    client: Option<AppClient>,
     worker: Option<Sender<WorkerCommand>>,
     analysis_id: Option<AnalysisId>,
     volumes: Vec<Volume>,
@@ -189,7 +194,7 @@ impl Default for ControllerRust {
             bytes_scanned: 0.0,
             skipped_entries: 0.0,
             plan_estimated_rewrite_bytes: 0.0,
-            client: InProcessClient::new(),
+            client: None,
             worker: None,
             analysis_id: None,
             volumes: Vec::new(),
@@ -200,13 +205,51 @@ impl Default for ControllerRust {
     }
 }
 
+#[cfg(all(feature = "development-service", not(feature = "system-helper")))]
+fn connect_client() -> Result<AppClient, String> {
+    AppClient::connect().map_err(|error| error.to_string())
+}
+
+#[cfg(all(not(feature = "development-service"), not(feature = "system-helper")))]
+fn connect_client() -> Result<AppClient, String> {
+    Ok(AppClient::new())
+}
+
+#[cfg(feature = "system-helper")]
+fn connect_client() -> Result<AppClient, String> {
+    AppClient::connect().map_err(|error| error.to_string())
+}
+
+#[cfg(all(not(feature = "development-service"), not(feature = "system-helper")))]
+fn starting_status() -> &'static str {
+    "Reading the filesystem allocation map…"
+}
+
+#[cfg(any(feature = "development-service", feature = "system-helper"))]
+fn starting_status() -> &'static str {
+    "Waiting for authorization…"
+}
+
 impl qobject::Controller {
     fn refresh(mut self: Pin<&mut Self>) {
-        match self.client.list_volumes() {
+        let client = match self.client.as_ref().cloned() {
+            Some(client) => client,
+            None => match connect_client() {
+                Ok(client) => client,
+                Err(error) => {
+                    self.as_mut().set_status(QString::from(&format!(
+                        "Could not initialize analysis: {error}"
+                    )));
+                    return;
+                }
+            },
+        };
+        match client.list_volumes() {
             Ok(volumes) => {
                 let count = count_i32(volumes.len());
                 self.as_mut().set_volume_count(0);
                 self.as_mut().rust_mut().volumes = volumes;
+                self.as_mut().rust_mut().client = Some(client);
                 self.as_mut().set_volume_count(count);
                 self.as_mut().set_status(QString::default());
             }
@@ -225,13 +268,11 @@ impl qobject::Controller {
                 .set_status(QString::from("Select a valid volume first"));
             return;
         };
-        let handle = match self.client.start_analysis(VolumeId(volume_id)) {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.as_mut()
-                    .set_status(QString::from(&format!("Analysis failed to start: {error}")));
-                return;
-            }
+        let Some(client) = self.client.as_ref().cloned() else {
+            self.as_mut().set_status(QString::from(
+                "Refresh volumes to initialize the analysis service",
+            ));
+            return;
         };
 
         let (command_sender, command_receiver) = mpsc::channel();
@@ -257,11 +298,19 @@ impl qobject::Controller {
         self.as_mut().set_plan_estimated_rewrite_bytes(0.0);
         self.as_mut().set_paused(false);
         self.as_mut().set_busy(true);
-        self.as_mut()
-            .set_status(QString::from("Reading the filesystem allocation map…"));
+        self.as_mut().set_status(QString::from(starting_status()));
 
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
+            let handle = match client.start_analysis(VolumeId(volume_id)) {
+                Ok(handle) => handle,
+                Err(error) => {
+                    let _ = qt_thread.queue(move |controller| {
+                        controller.apply_update(UiUpdate::Failed(error.to_string()))
+                    });
+                    return;
+                }
+            };
             loop {
                 loop {
                     match command_receiver.try_recv() {
@@ -360,7 +409,12 @@ impl qobject::Controller {
             minimum_excess_runs: 1,
             minimum_file_bytes: 0,
         };
-        match self.client.build_plan(analysis_id, &policy) {
+        let Some(client) = self.client.as_ref().cloned() else {
+            self.as_mut()
+                .set_status(QString::from("The analysis session is unavailable"));
+            return;
+        };
+        match client.build_plan(analysis_id, &policy) {
             Ok((_, plan)) => {
                 let count = count_i32(plan.candidates.len());
                 let estimated_rewrite_bytes = plan.estimated_rewrite_bytes as f64;

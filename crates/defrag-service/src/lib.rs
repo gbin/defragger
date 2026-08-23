@@ -3,6 +3,8 @@ mod ext4;
 mod fat;
 mod linux;
 mod mounts;
+#[cfg(feature = "system-helper-client")]
+mod remote;
 mod service;
 
 use std::sync::Arc;
@@ -11,6 +13,10 @@ use defrag_domain::{
     AnalysisReport, DefragPolicy, ExecutionRequirements, PlanSummary, SupportStatus, Volume,
 };
 
+#[cfg(feature = "development-client")]
+pub use remote::DevelopmentClient;
+#[cfg(feature = "system-helper-client")]
+pub use remote::{PrivilegedClient, PrivilegedClientError, PrivilegedJobHandle};
 pub use service::{InProcessClient, JobHandle, ServiceError};
 
 pub trait EventSink: Send + Sync {

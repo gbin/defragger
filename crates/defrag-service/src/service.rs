@@ -165,6 +165,15 @@ impl InProcessClient {
         let plan_id = PlanId(self.inner.next_plan.fetch_add(1, Ordering::Relaxed));
         Ok((plan_id, plan.summary().clone()))
     }
+
+    pub fn discard_analysis(&self, analysis_id: AnalysisId) -> Result<(), ServiceError> {
+        self.inner
+            .analyses
+            .lock()
+            .map_err(|_| ServiceError::Poisoned)?
+            .remove(&analysis_id);
+        Ok(())
+    }
 }
 
 pub struct JobHandle {

@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["development-service"]
+development-service = ["dep:defragger-helper", "defrag-service/development-client"]
+system-helper = ["defrag-service/system-helper-client"]
+
 [dependencies]
 cxx = "1.0.176"
 cxx-qt = "0.9.1"
 cxx-qt-lib = { version = "0.9.1", features = ["full"] }
 defrag-domain = { path = "../../crates/defrag-domain" }
 defrag-service = { path = "../../crates/defrag-service" }
+defragger-helper = { path = "../defragger-helper", optional = true }
 
 [build-dependencies]
 cxx-qt-build = { version = "0.9.1", features = ["link_qt_object_files"] }

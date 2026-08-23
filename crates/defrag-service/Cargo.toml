@@ -5,7 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+system-helper-client = ["dep:serde_json", "dep:zbus"]
+development-client = ["system-helper-client"]
+
 [dependencies]
 defrag-domain = { path = "../defrag-domain" }
 libc.workspace = true
+serde_json = { workspace = true, optional = true }
 thiserror.workspace = true
+zbus = { workspace = true, optional = true }

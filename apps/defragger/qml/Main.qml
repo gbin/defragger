@@ -159,7 +159,12 @@ Kirigami.ApplicationWindow {
                         }
                         MouseArea { anchors.fill: parent; onClicked: window.selectedIndex = index; onDoubleClicked: window.analyzeSelected() }
                     }
-                    Kirigami.PlaceholderMessage { anchors.centerIn: parent; visible: controller.volume_count === 0; text: qsTr("No disk volumes found") }
+                    Kirigami.PlaceholderMessage {
+                        anchors.centerIn: parent
+                        visible: controller.volume_count === 0
+                        text: controller.status.length > 0
+                            ? controller.status : qsTr("No disk volumes found")
+                    }
                 }
             }
         }
@@ -202,13 +207,20 @@ Kirigami.ApplicationWindow {
                     RowLayout {
                         Layout.fillWidth: true
                         Controls.Label {
-                            text: window.selectedIsBeingAnalyzed ? qsTr("Analysis in progress") : (window.selectedHasReport ? qsTr("Analysis complete") : qsTr("Ready"))
+                            text: controller.volume_count === 0
+                                && controller.status.length > 0
+                                ? qsTr("Unavailable")
+                                : (window.selectedIsBeingAnalyzed
+                                    ? qsTr("Analysis in progress")
+                                    : (window.selectedHasReport
+                                        ? qsTr("Analysis complete") : qsTr("Ready")))
                             font.bold: true
                         }
                         Controls.Label {
                             Layout.fillWidth: true
-                            visible: window.selectedIsBeingAnalyzed && text.length > 0
-                            text: window.selectedIsBeingAnalyzed ? controller.status : ""
+                            visible: text.length > 0
+                            text: window.selectedIsBeingAnalyzed
+                                || controller.volume_count === 0 ? controller.status : ""
                             elide: Text.ElideMiddle
                             horizontalAlignment: Text.AlignRight
                             color: Kirigami.Theme.disabledTextColor

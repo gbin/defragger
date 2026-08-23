@@ -1,0 +1,21 @@
+[Unit]
+Description=Defragger privileged read-only analysis helper
+
+[Service]
+Type=dbus
+BusName=io.github.defragger.Helper
+ExecStart=@CMAKE_INSTALL_FULL_LIBEXECDIR@/defragger-helper
+User=root
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_SYS_RAWIO
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateTmp=yes
+ProtectHome=read-only
+ProtectSystem=strict
+InaccessiblePaths=/dev
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes

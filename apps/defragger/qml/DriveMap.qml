@@ -249,17 +249,25 @@ Item {
         if (renderedGeneration !== rebuildGeneration)
             return
         workerBusy = false
-        try {
-            mapView = new DataView(mapData)
-            binCount = Math.floor(mapView.byteLength / recordBytes)
-            // A live map update normally preserves the tile count. Canvas is
-            // imperative, so replacing its data buffer does not schedule a
-            // repaint by itself.
-            canvas.requestPaint()
-        } catch (error) {
-            console.warn("Could not read drive map buffer:", error)
+        // A default/null QByteArray becomes `null` rather than an empty
+        // ArrayBuffer in QML. There is simply no map to draw in that state.
+        if (!mapData || mapData.byteLength === 0) {
             mapView = null
             binCount = 0
+            canvas.requestPaint()
+        } else {
+            try {
+                mapView = new DataView(mapData)
+                binCount = Math.floor(mapView.byteLength / recordBytes)
+                // A live map update normally preserves the tile count. Canvas
+                // is imperative, so replacing its data buffer does not
+                // schedule a repaint by itself.
+                canvas.requestPaint()
+            } catch (error) {
+                console.warn("Could not read drive map buffer:", error)
+                mapView = null
+                binCount = 0
+            }
         }
         // Publish every completed frame before starting the next one. During
         // a scan, updates can arrive faster than aggregation; skipping here
