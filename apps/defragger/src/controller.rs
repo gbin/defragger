@@ -105,7 +105,25 @@ use defrag_service::InProcessClient as AppClient;
 #[cfg(feature = "system-helper")]
 use defrag_service::PrivilegedClient as AppClient;
 
-const MAP_RECORD_BYTES: usize = 42;
+const MAP_CATEGORY_BYTES: usize = 42;
+const MAP_CONTRIBUTOR_BYTES: usize = 6;
+const MAX_MAP_CONTRIBUTORS: usize = 5;
+const MAP_RECORD_BYTES: usize = MAP_CATEGORY_BYTES + MAP_CONTRIBUTOR_BYTES * MAX_MAP_CONTRIBUTORS;
+
+#[derive(Clone, Copy)]
+struct MapContributor {
+    file_index: u32,
+    coverage_basis_points: u16,
+}
+
+impl Default for MapContributor {
+    fn default() -> Self {
+        Self {
+            file_index: u32::MAX,
+            coverage_basis_points: 0,
+        }
+    }
+}
 
 enum WorkerCommand {
     Pause,
@@ -542,13 +560,19 @@ impl qobject::Controller {
         } else {
             Vec::new()
         };
+        let files = if use_analysis {
+            self.file_rows.clone()
+        } else {
+            Vec::new()
+        };
         let width = dimension(width);
         let height = dimension(height);
         let capacity_bytes = finite_u64(capacity_bytes);
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let bins = aggregate_map(&source, capacity_bytes, width, height);
-            let bytes = encode_map(&bins);
+            let contributors = file_contributors(&bins, &files);
+            let bytes = encode_map(&bins, &contributors);
             let data = QByteArray::from(bytes.as_slice());
             let _ = qt_thread.queue(move |mut controller| {
                 controller.as_mut().set_display_map_data(data);
@@ -664,9 +688,9 @@ fn optional_basis_points(value: Option<u16>) -> i32 {
     value.map_or(-1, i32::from)
 }
 
-fn encode_map(bins: &[MapBin]) -> Vec<u8> {
+fn encode_map(bins: &[MapBin], contributors: &[[MapContributor; MAX_MAP_CONTRIBUTORS]]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(bins.len().saturating_mul(MAP_RECORD_BYTES));
-    for bin in bins {
+    for (index, bin) in bins.iter().enumerate() {
         bytes.extend_from_slice(&bin.offset_bytes.to_le_bytes());
         bytes.extend_from_slice(&bin.length_bytes.to_le_bytes());
         for value in [
@@ -680,8 +704,83 @@ fn encode_map(bins: &[MapBin]) -> Vec<u8> {
         {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
+        for contributor in contributors.get(index).copied().unwrap_or_default() {
+            bytes.extend_from_slice(&contributor.file_index.to_le_bytes());
+            bytes.extend_from_slice(&contributor.coverage_basis_points.to_le_bytes());
+        }
     }
     bytes
+}
+
+fn file_contributors(
+    bins: &[MapBin],
+    files: &[FileReport],
+) -> Vec<[MapContributor; MAX_MAP_CONTRIBUTORS]> {
+    let mut overlaps = vec![Vec::<(usize, u64)>::new(); bins.len()];
+
+    for (file_index, file) in files.iter().enumerate() {
+        if u32::try_from(file_index).is_err() {
+            break;
+        }
+        for range in &file.physical_ranges {
+            let range_end = range.offset_bytes.saturating_add(range.length_bytes);
+            if range.length_bytes == 0 {
+                continue;
+            }
+            let mut bin_index = bins.partition_point(|bin| {
+                bin.offset_bytes.saturating_add(bin.length_bytes) <= range.offset_bytes
+            });
+            while let Some(bin) = bins.get(bin_index) {
+                if bin.offset_bytes >= range_end {
+                    break;
+                }
+                let overlap = range_end
+                    .min(bin.offset_bytes.saturating_add(bin.length_bytes))
+                    .saturating_sub(range.offset_bytes.max(bin.offset_bytes));
+                if overlap > 0 {
+                    overlaps[bin_index].push((file_index, overlap));
+                }
+                bin_index += 1;
+            }
+        }
+    }
+
+    overlaps
+        .into_iter()
+        .zip(bins)
+        .map(|(mut entries, bin)| {
+            entries.sort_unstable_by_key(|(file_index, _)| *file_index);
+            let mut totals = Vec::<(usize, u64)>::new();
+            for (file_index, overlap) in entries {
+                if let Some((last_index, total)) = totals.last_mut()
+                    && *last_index == file_index
+                {
+                    *total = total.saturating_add(overlap);
+                } else {
+                    totals.push((file_index, overlap));
+                }
+            }
+            totals.sort_unstable_by(|left, right| {
+                right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
+            });
+
+            let mut result = [MapContributor::default(); MAX_MAP_CONTRIBUTORS];
+            for (slot, (file_index, overlap)) in result
+                .iter_mut()
+                .zip(totals.into_iter().take(MAX_MAP_CONTRIBUTORS))
+            {
+                *slot = MapContributor {
+                    file_index: file_index as u32,
+                    coverage_basis_points: weighted_basis_points(
+                        u128::from(overlap) * 10_000,
+                        bin.length_bytes,
+                    )
+                    .max(1),
+                };
+            }
+            result
+        })
+        .collect()
 }
 
 fn dimension(value: f64) -> u32 {
@@ -860,6 +959,10 @@ fn metadata_values(metadata: MetadataMix) -> [u16; 9] {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use defrag_domain::PhysicalRange;
+
     use super::*;
 
     #[test]
@@ -934,6 +1037,66 @@ mod tests {
     }
 
     #[test]
+    fn contributors_are_ranked_by_overlap_with_each_block() {
+        let bins = vec![
+            MapBin {
+                offset_bytes: 0,
+                length_bytes: 100,
+                mix: CategoryMix::default(),
+            },
+            MapBin {
+                offset_bytes: 100,
+                length_bytes: 100,
+                mix: CategoryMix::default(),
+            },
+        ];
+        let file = |path: &str, physical_ranges| FileReport {
+            path: PathBuf::from(path),
+            logical_bytes: 0,
+            allocated_bytes: 0,
+            physical_runs: 2,
+            minimum_runs: 1,
+            excess_runs: 1,
+            average_run_bytes: 0,
+            eligible_for_plan: true,
+            exclusion_reason: None,
+            physical_ranges,
+        };
+        let files = vec![
+            file(
+                "/large",
+                vec![PhysicalRange {
+                    offset_bytes: 10,
+                    length_bytes: 80,
+                }],
+            ),
+            file(
+                "/split",
+                vec![
+                    PhysicalRange {
+                        offset_bytes: 0,
+                        length_bytes: 30,
+                    },
+                    PhysicalRange {
+                        offset_bytes: 100,
+                        length_bytes: 50,
+                    },
+                ],
+            ),
+        ];
+
+        let contributors = file_contributors(&bins, &files);
+
+        assert_eq!(contributors[0][0].file_index, 0);
+        assert_eq!(contributors[0][0].coverage_basis_points, 8_000);
+        assert_eq!(contributors[0][1].file_index, 1);
+        assert_eq!(contributors[0][1].coverage_basis_points, 3_000);
+        assert_eq!(contributors[1][0].file_index, 1);
+        assert_eq!(contributors[1][0].coverage_basis_points, 5_000);
+        assert_eq!(contributors[1][1].file_index, u32::MAX);
+    }
+
+    #[test]
     fn map_transport_is_fixed_width_binary() {
         let bin = MapBin {
             offset_bytes: 0x0102_0304_0506_0708,
@@ -957,7 +1120,12 @@ mod tests {
             },
         };
 
-        let bytes = encode_map(&[bin]);
+        let mut contributors = [MapContributor::default(); MAX_MAP_CONTRIBUTORS];
+        contributors[0] = MapContributor {
+            file_index: 7,
+            coverage_basis_points: 2_500,
+        };
+        let bytes = encode_map(&[bin], &[contributors]);
 
         assert_eq!(bytes.len(), MAP_RECORD_BYTES);
         assert_eq!(&bytes[..8], &0x0102_0304_0506_0708u64.to_le_bytes());
@@ -966,5 +1134,8 @@ mod tests {
             let offset = 16 + index * 2;
             assert_eq!(&bytes[offset..offset + 2], &value.to_le_bytes());
         }
+        assert_eq!(&bytes[42..46], &7u32.to_le_bytes());
+        assert_eq!(&bytes[46..48], &2_500u16.to_le_bytes());
+        assert_eq!(&bytes[48..52], &u32::MAX.to_le_bytes());
     }
 }

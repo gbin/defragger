@@ -180,6 +180,7 @@ Kirigami.ApplicationWindow {
                 && window.selectedVolumeId === String(controller.map_volume_id)
             sourceRevision: useAnalysis ? controller.map_revision : 0
             mapData: controller.display_map_data
+            detailsProvider: controller
             renderedGeneration: controller.display_map_generation
             onRebuildRequested: function(width, height, capacity, analysis, generation) {
                 controller.render_map(width, height, capacity, analysis, generation)

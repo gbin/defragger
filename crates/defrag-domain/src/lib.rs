@@ -83,6 +83,16 @@ pub struct FileReport {
     pub average_run_bytes: u64,
     pub eligible_for_plan: bool,
     pub exclusion_reason: Option<String>,
+    /// Physical ranges are retained only for fragmented files so the UI can
+    /// identify which files occupy a selected drive-map block.
+    #[serde(default)]
+    pub physical_ranges: Vec<PhysicalRange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PhysicalRange {
+    pub offset_bytes: u64,
+    pub length_bytes: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -1,11 +1,13 @@
 import QtQuick
 import QtQuick.Controls as Controls
+import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 
 Item {
     id: root
 
     property var mapData
+    property var detailsProvider: null
     property string volumeId: ""
     property double capacityBytes: 0
     property bool useAnalysis: false
@@ -18,7 +20,9 @@ Item {
     property bool rebuildPending: false
     property bool geometryPending: false
     property int rebuildGeneration: 0
-    readonly property int recordBytes: 42
+    readonly property int recordBytes: 72
+    readonly property int contributorOffset: 42
+    readonly property int maxContributors: 5
 
     signal rebuildRequested(
         real width,
@@ -69,6 +73,10 @@ Item {
         return number.toFixed(unit === 0 ? 0 : 1) + " " + units[unit]
     }
 
+    function integer(value) {
+        return Math.floor(value).toLocaleString(Qt.locale(), "f", 0)
+    }
+
     function field(index, fieldIndex) {
         return mapView.getUint16(index * recordBytes + 16 + fieldIndex * 2, true)
     }
@@ -77,6 +85,10 @@ Item {
         const offset = index * recordBytes + byteOffset
         return mapView.getUint32(offset, true)
             + mapView.getUint32(offset + 4, true) * 4294967296
+    }
+
+    function uint32(index, byteOffset) {
+        return mapView.getUint32(index * recordBytes + byteOffset, true)
     }
 
     function cellCategory(index) {
@@ -192,21 +204,13 @@ Item {
         )
     }
 
-    function detailText(index) {
+    function statistics(index) {
         if (!mapView || index < 0 || index >= binCount)
-            return ""
-        const category = cellCategory(index)
-        const start = uint64(index, 0)
-        const length = uint64(index, 8)
-        const end = start + length
-        const lines = [
-            categoryLabel(category) + qsTr(" (display priority)"),
-            bytes(start) + " – " + bytes(end),
-            qsTr("Cell span: %1").arg(bytes(length))
-        ]
+            return []
+        const rows = []
         const append = function(label, value) {
             if ((value || 0) > 0)
-                lines.push(label + ": " + percent(value))
+                rows.push({ label: label, value: value })
         }
         append(qsTr("Fragmented data"), field(index, 2))
         append(qsTr("Contiguous data"), field(index, 1))
@@ -220,7 +224,41 @@ Item {
         for (let i = 0; i < metadataTypes.length; ++i)
             described += field(index, 4 + i)
         append(qsTr("Empty"), Math.min(10000, field(index, 0) + Math.max(0, 10000 - described)))
-        return lines.join("\n")
+        return rows
+    }
+
+    function relatedItems(index) {
+        if (!mapView || !detailsProvider || index < 0 || index >= binCount)
+            return []
+        const items = []
+        for (let slot = 0; slot < maxContributors; ++slot) {
+            const offset = contributorOffset + slot * 6
+            const fileIndex = uint32(index, offset)
+            const coverage = field(index, (offset + 4 - 16) / 2)
+            if (fileIndex !== 4294967295 && coverage > 0) {
+                items.push({
+                    kind: qsTr("File"),
+                    label: String(detailsProvider.file_path(fileIndex)),
+                    value: coverage,
+                    color: "#dc4f4a"
+                })
+            }
+        }
+        for (let i = 0; i < metadataTypes.length; ++i) {
+            const coverage = field(index, 4 + i)
+            if (coverage > 0) {
+                items.push({
+                    kind: qsTr("Metadata"),
+                    label: metadataTypes[i][1],
+                    value: coverage,
+                    color: metadataTypes[i][2]
+                })
+            }
+        }
+        items.sort(function(left, right) {
+            return right.value - left.value
+        })
+        return items.slice(0, 5)
     }
 
     onSourceRevisionChanged: {
@@ -356,11 +394,14 @@ Item {
             }
             Controls.ToolTip {
                 id: hoverTip
+                readonly property var stats: root.hoveredIndex >= 0
+                    ? root.statistics(root.hoveredIndex) : []
+                readonly property var related: root.hoveredIndex >= 0
+                    ? root.relatedItems(root.hoveredIndex) : []
                 visible: hoverArea.containsMouse && root.hoveredIndex >= 0
                 delay: Kirigami.Units.toolTipDelay
                 timeout: -1
-                text: root.hoveredIndex >= 0
-                    ? root.detailText(root.hoveredIndex) : ""
+                width: Math.min(500, Math.max(360, hoverArea.width - 12))
                 x: Math.max(0, Math.min(
                     hoverArea.width - width,
                     hoverArea.mouseX + 14
@@ -371,6 +412,99 @@ Item {
                         ? hoverArea.mouseY + 18
                         : hoverArea.mouseY - height - 12
                 ))
+
+                contentItem: ColumnLayout {
+                    spacing: Kirigami.Units.smallSpacing
+
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        text: root.hoveredIndex >= 0
+                            ? root.categoryLabel(root.cellCategory(root.hoveredIndex)) : ""
+                        font.bold: true
+                    }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        color: Kirigami.Theme.disabledTextColor
+                        text: {
+                            if (root.hoveredIndex < 0)
+                                return ""
+                            const start = root.uint64(root.hoveredIndex, 0)
+                            const length = root.uint64(root.hoveredIndex, 8)
+                            const firstSector = Math.floor(start / 512)
+                            const lastSector = Math.max(firstSector,
+                                Math.ceil((start + length) / 512) - 1)
+                            return qsTr("Sectors %1 – %2")
+                                .arg(root.integer(firstSector))
+                                .arg(root.integer(lastSector))
+                        }
+                    }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        text: root.hoveredIndex >= 0
+                            ? qsTr("Block size: %1").arg(root.bytes(root.uint64(root.hoveredIndex, 8)))
+                            : ""
+                    }
+
+                    Repeater {
+                        model: hoverTip.stats
+                        delegate: RowLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.largeSpacing
+                            Controls.Label {
+                                Layout.fillWidth: true
+                                text: modelData.label
+                            }
+                            Controls.Label {
+                                text: root.percent(modelData.value)
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Kirigami.Units.smallSpacing
+                        Layout.bottomMargin: Kirigami.Units.smallSpacing
+                        implicitHeight: 1
+                        color: Kirigami.Theme.disabledTextColor
+                        visible: hoverTip.related.length > 0
+                    }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        visible: hoverTip.related.length > 0
+                        text: qsTr("Related in this block")
+                        font.bold: true
+                    }
+                    Repeater {
+                        model: hoverTip.related
+                        delegate: RowLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: Kirigami.Units.smallSpacing
+                            Rectangle {
+                                Layout.preferredWidth: 8
+                                Layout.preferredHeight: 8
+                                radius: 4
+                                color: modelData.color
+                            }
+                            Controls.Label {
+                                Layout.preferredWidth: 64
+                                text: modelData.kind
+                                color: Kirigami.Theme.disabledTextColor
+                            }
+                            Controls.Label {
+                                Layout.fillWidth: true
+                                text: modelData.label
+                                elide: Text.ElideMiddle
+                            }
+                            Controls.Label {
+                                text: root.percent(modelData.value)
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+                }
             }
         }
     }

@@ -8,8 +8,8 @@ use std::{
 
 use defrag_domain::{
     AnalysisCompleteness, AnalysisPhase, AnalysisReport, DefragPolicy, ExecutionRequirements,
-    FileReport, FragmentationMetrics, JobId, JobProgress, PlanCandidate, PlanSummary,
-    RequiredMountState, ScanCoverage, SupportStatus, Volume,
+    FileReport, FragmentationMetrics, JobId, JobProgress, PhysicalRange, PlanCandidate,
+    PlanSummary, RequiredMountState, ScanCoverage, SupportStatus, Volume,
 };
 
 use crate::{
@@ -356,6 +356,18 @@ fn inspect_file(
         average_run_bytes,
         eligible_for_plan: exclusion_reason.is_none(),
         exclusion_reason,
+        physical_ranges: (excess_runs > 0)
+            .then(|| {
+                extents
+                    .iter()
+                    .filter_map(physical_range)
+                    .map(|(offset_bytes, length_bytes)| PhysicalRange {
+                        offset_bytes,
+                        length_bytes,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
