@@ -23,7 +23,8 @@ Kirigami.ApplicationWindow {
         && selectedVolumeId === String(controller.report_volume_id)
     readonly property bool selectedIsBeingAnalyzed: hasSelectedVolume
         && controller.busy
-        && selectedVolumeId === String(controller.map_volume_id)
+        && selectedVolumeId === String(controller.analyzing_volume_id)
+    onSelectedVolumeIdChanged: controller.select_volume(selectedVolumeId)
     function bytes(value) {
         if (!value) return "0 B"
         const units = ["B", "KiB", "MiB", "GiB", "TiB"]
@@ -39,14 +40,7 @@ Kirigami.ApplicationWindow {
     function integer(value) {
         if (!isFinite(value) || value < 0)
             return "0"
-        const digits = Math.floor(value).toFixed(0)
-        let grouped = ""
-        for (let index = 0; index < digits.length; ++index) {
-            if (index > 0 && (digits.length - index) % 3 === 0)
-                grouped += "'"
-            grouped += digits[index]
-        }
-        return grouped
+        return Math.floor(value).toLocaleString(Qt.locale(), "f", 0)
     }
     Controller {
         id: controller
@@ -150,12 +144,24 @@ Kirigami.ApplicationWindow {
                                 }
                             }
                             Controls.Label {
-                                text: controller.has_report
-                                    && String(controller.report_volume_id) === volumeId
-                                    ? window.percent(controller.fragmented_basis_points) : "—"
+                                text: {
+                                    const revision = controller.analysis_revision
+                                    return controller.volume_has_report(index)
+                                        ? window.percent(controller.volume_fragmented_basis_points(index)) : "—"
+                                }
                                 Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight
                             }
-                            Controls.Label { text: controller.busy && String(controller.map_volume_id) === volumeId ? qsTr("Analyzing…") : (controller.volume_supported(index) ? qsTr("Analyze") : qsTr("Unsupported")); Layout.fillWidth: true }
+                            Controls.Label {
+                                text: {
+                                    const revision = controller.analysis_revision
+                                    return controller.busy && String(controller.analyzing_volume_id) === volumeId
+                                        ? qsTr("Analyzing…")
+                                        : (controller.volume_has_report(index)
+                                            ? qsTr("Analyzed")
+                                            : (controller.volume_supported(index) ? "" : qsTr("Unsupported")))
+                                }
+                                Layout.fillWidth: true
+                            }
                         }
                         MouseArea { anchors.fill: parent; onClicked: window.selectedIndex = index; onDoubleClicked: window.analyzeSelected() }
                     }

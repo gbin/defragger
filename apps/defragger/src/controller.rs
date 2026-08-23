@@ -17,8 +17,10 @@ mod qobject {
         #[qproperty(QString, status)]
         #[qproperty(QString, map_volume_id)]
         #[qproperty(QString, report_volume_id)]
+        #[qproperty(QString, analyzing_volume_id)]
         #[qproperty(i32, volume_count)]
         #[qproperty(i32, map_revision)]
+        #[qproperty(i32, analysis_revision)]
         #[qproperty(i32, display_map_generation)]
         #[qproperty(i32, fragmented_basis_points)]
         #[qproperty(i32, coverage_basis_points)]
@@ -38,6 +40,8 @@ mod qobject {
         fn refresh(self: Pin<&mut Controller>);
         #[qinvokable]
         fn analyze(self: Pin<&mut Controller>, volume_id: &QString);
+        #[qinvokable]
+        fn select_volume(self: Pin<&mut Controller>, volume_id: &QString);
         #[qinvokable]
         fn pause(self: Pin<&mut Controller>);
         #[qinvokable]
@@ -62,6 +66,10 @@ mod qobject {
         fn volume_free_bytes(self: &Controller, index: i32) -> f64;
         #[qinvokable]
         fn volume_supported(self: &Controller, index: i32) -> bool;
+        #[qinvokable]
+        fn volume_has_report(self: &Controller, index: i32) -> bool;
+        #[qinvokable]
+        fn volume_fragmented_basis_points(self: &Controller, index: i32) -> i32;
         #[qinvokable]
         fn file_path(self: &Controller, index: i32) -> QString;
         #[qinvokable]
@@ -91,6 +99,7 @@ mod qobject {
 }
 
 use std::{
+    collections::HashMap,
     pin::Pin,
     sync::{
         Arc,
@@ -175,13 +184,30 @@ struct UiReport {
     map_files: Vec<FileReport>,
 }
 
+#[derive(Clone)]
+struct CachedAnalysis {
+    analysis_id: AnalysisId,
+    fragmented_basis_points: i32,
+    coverage_basis_points: i32,
+    files_scanned: f64,
+    bytes_scanned: f64,
+    skipped_entries: f64,
+    status: String,
+    map_bins: Vec<MapBin>,
+    file_rows: Vec<FileReport>,
+    map_files: Vec<FileReport>,
+    map_file_ranges: Arc<Vec<MapFileRange>>,
+}
+
 pub struct ControllerRust {
     display_map_data: QByteArray,
     status: QString,
     map_volume_id: QString,
     report_volume_id: QString,
+    analyzing_volume_id: QString,
     volume_count: i32,
     map_revision: i32,
+    analysis_revision: i32,
     display_map_generation: i32,
     fragmented_basis_points: i32,
     coverage_basis_points: i32,
@@ -198,6 +224,13 @@ pub struct ControllerRust {
     client: Option<AppClient>,
     worker: Option<Sender<WorkerCommand>>,
     analysis_id: Option<AnalysisId>,
+    visible_volume_id: Option<VolumeId>,
+    active_volume_id: Option<VolumeId>,
+    active_map_bins: Vec<MapBin>,
+    active_files_scanned: f64,
+    active_bytes_scanned: f64,
+    active_status: String,
+    analyses: HashMap<VolumeId, CachedAnalysis>,
     volumes: Vec<Volume>,
     map_bins: Vec<MapBin>,
     file_rows: Vec<FileReport>,
@@ -213,8 +246,10 @@ impl Default for ControllerRust {
             status: QString::default(),
             map_volume_id: QString::default(),
             report_volume_id: QString::default(),
+            analyzing_volume_id: QString::default(),
             volume_count: 0,
             map_revision: 0,
+            analysis_revision: 0,
             display_map_generation: 0,
             fragmented_basis_points: -1,
             coverage_basis_points: -1,
@@ -231,6 +266,13 @@ impl Default for ControllerRust {
             client: None,
             worker: None,
             analysis_id: None,
+            visible_volume_id: None,
+            active_volume_id: None,
+            active_map_bins: Vec::new(),
+            active_files_scanned: 0.0,
+            active_bytes_scanned: 0.0,
+            active_status: String::new(),
+            analyses: HashMap::new(),
             volumes: Vec::new(),
             map_bins: Vec::new(),
             file_rows: Vec::new(),
@@ -311,36 +353,23 @@ impl qobject::Controller {
             return;
         };
 
+        let volume_id = VolumeId(volume_id);
         let (command_sender, command_receiver) = mpsc::channel();
         self.as_mut().rust_mut().worker = Some(command_sender);
-        self.as_mut().rust_mut().analysis_id = None;
+        self.as_mut().rust_mut().active_volume_id = Some(volume_id);
+        self.as_mut().rust_mut().active_map_bins.clear();
+        self.as_mut().rust_mut().active_files_scanned = 0.0;
+        self.as_mut().rust_mut().active_bytes_scanned = 0.0;
+        self.as_mut().rust_mut().active_status = starting_status().to_owned();
         self.as_mut()
-            .set_map_volume_id(QString::from(&volume_id.to_string()));
-        self.as_mut().rust_mut().map_bins.clear();
-        self.as_mut().rust_mut().file_rows.clear();
-        self.as_mut().rust_mut().map_files.clear();
-        self.as_mut().rust_mut().map_file_ranges = Arc::default();
-        self.as_mut().rust_mut().plan_candidates.clear();
-        let revision = self.map_revision.wrapping_add(1);
-        self.as_mut().set_map_revision(revision);
-        self.as_mut().set_report_volume_id(QString::default());
-        self.as_mut().set_fragmented_basis_points(-1);
-        self.as_mut().set_coverage_basis_points(-1);
-        self.as_mut().set_file_row_count(0);
-        self.as_mut().set_plan_candidate_count(0);
-        self.as_mut().set_plan_revision(0);
-        self.as_mut().set_has_report(false);
-        self.as_mut().set_files_scanned(0.0);
-        self.as_mut().set_bytes_scanned(0.0);
-        self.as_mut().set_skipped_entries(0.0);
-        self.as_mut().set_plan_estimated_rewrite_bytes(0.0);
+            .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
         self.as_mut().set_paused(false);
         self.as_mut().set_busy(true);
-        self.as_mut().set_status(QString::from(starting_status()));
+        self.as_mut().display_volume(volume_id);
 
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
-            let handle = match client.start_analysis(VolumeId(volume_id)) {
+            let handle = match client.start_analysis(volume_id) {
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = qt_thread.queue(move |controller| {
@@ -413,27 +442,45 @@ impl qobject::Controller {
         });
     }
 
+    fn select_volume(mut self: Pin<&mut Self>, volume_id: &QString) {
+        let Ok(volume_id) = volume_id.to_string().parse::<u64>() else {
+            self.as_mut().clear_display();
+            self.as_mut().rust_mut().visible_volume_id = None;
+            return;
+        };
+        self.as_mut().display_volume(VolumeId(volume_id));
+    }
+
     fn pause(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.worker {
             let _ = worker.send(WorkerCommand::Pause);
+            self.as_mut().rust_mut().active_status = "Analysis paused".to_owned();
             self.as_mut().set_paused(true);
-            self.as_mut().set_status(QString::from("Analysis paused"));
+            if self.active_is_visible() {
+                self.as_mut().set_status(QString::from("Analysis paused"));
+            }
         }
     }
 
     fn resume(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.worker {
             let _ = worker.send(WorkerCommand::Resume);
+            self.as_mut().rust_mut().active_status = "Analysis resumed".to_owned();
             self.as_mut().set_paused(false);
-            self.as_mut().set_status(QString::from("Analysis resumed"));
+            if self.active_is_visible() {
+                self.as_mut().set_status(QString::from("Analysis resumed"));
+            }
         }
     }
 
     fn stop(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.worker {
             let _ = worker.send(WorkerCommand::Cancel);
-            self.as_mut()
-                .set_status(QString::from("Stopping analysis…"));
+            self.as_mut().rust_mut().active_status = "Stopping analysis…".to_owned();
+            if self.active_is_visible() {
+                self.as_mut()
+                    .set_status(QString::from("Stopping analysis…"));
+            }
         }
     }
 
@@ -516,6 +563,17 @@ impl qobject::Controller {
             .is_some_and(|volume| matches!(volume.support, SupportStatus::ReadOnly))
     }
 
+    fn volume_has_report(&self, index: i32) -> bool {
+        self.volume_row(index)
+            .is_some_and(|volume| self.analyses.contains_key(&volume.id))
+    }
+
+    fn volume_fragmented_basis_points(&self, index: i32) -> i32 {
+        self.volume_row(index)
+            .and_then(|volume| self.analyses.get(&volume.id))
+            .map_or(-1, |analysis| analysis.fragmented_basis_points)
+    }
+
     fn file_path(&self, index: i32) -> QString {
         self.file_row(index).map_or_else(QString::default, |file| {
             QString::from(&file.path.display().to_string())
@@ -581,6 +639,80 @@ impl qobject::Controller {
             .and_then(|index| self.plan_candidates.get(index))
     }
 
+    fn clear_display(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().analysis_id = None;
+        self.as_mut().rust_mut().map_bins.clear();
+        self.as_mut().rust_mut().file_rows.clear();
+        self.as_mut().rust_mut().map_files.clear();
+        self.as_mut().rust_mut().map_file_ranges = Arc::default();
+        self.as_mut().rust_mut().plan_candidates.clear();
+        self.as_mut().set_map_volume_id(QString::default());
+        self.as_mut().set_report_volume_id(QString::default());
+        self.as_mut().set_fragmented_basis_points(-1);
+        self.as_mut().set_coverage_basis_points(-1);
+        self.as_mut().set_file_row_count(0);
+        self.as_mut().set_plan_candidate_count(0);
+        self.as_mut().set_plan_revision(0);
+        self.as_mut().set_has_report(false);
+        self.as_mut().set_files_scanned(0.0);
+        self.as_mut().set_bytes_scanned(0.0);
+        self.as_mut().set_skipped_entries(0.0);
+        self.as_mut().set_plan_estimated_rewrite_bytes(0.0);
+        self.as_mut().set_status(QString::default());
+        let revision = self.map_revision.wrapping_add(1);
+        self.as_mut().set_map_revision(revision);
+    }
+
+    fn display_volume(mut self: Pin<&mut Self>, volume_id: VolumeId) {
+        self.as_mut().rust_mut().visible_volume_id = Some(volume_id);
+        let active = (self.active_volume_id == Some(volume_id)).then(|| {
+            (
+                self.active_map_bins.clone(),
+                self.active_files_scanned,
+                self.active_bytes_scanned,
+                self.active_status.clone(),
+            )
+        });
+        let cached = self.analyses.get(&volume_id).cloned();
+        self.as_mut().clear_display();
+
+        let volume_id_string = QString::from(&volume_id.0.to_string());
+        if let Some((map_bins, files, bytes, status)) = active {
+            self.as_mut().rust_mut().map_bins = map_bins;
+            self.as_mut().set_map_volume_id(volume_id_string);
+            self.as_mut().set_files_scanned(files);
+            self.as_mut().set_bytes_scanned(bytes);
+            self.as_mut().set_status(QString::from(&status));
+            return;
+        }
+
+        let Some(cached) = cached else {
+            return;
+        };
+        let file_row_count = count_i32(cached.file_rows.len());
+        self.as_mut().rust_mut().analysis_id = Some(cached.analysis_id);
+        self.as_mut().rust_mut().map_bins = cached.map_bins;
+        self.as_mut().rust_mut().file_rows = cached.file_rows;
+        self.as_mut().rust_mut().map_files = cached.map_files;
+        self.as_mut().rust_mut().map_file_ranges = cached.map_file_ranges;
+        self.as_mut().set_map_volume_id(volume_id_string.clone());
+        self.as_mut().set_report_volume_id(volume_id_string);
+        self.as_mut()
+            .set_fragmented_basis_points(cached.fragmented_basis_points);
+        self.as_mut()
+            .set_coverage_basis_points(cached.coverage_basis_points);
+        self.as_mut().set_file_row_count(file_row_count);
+        self.as_mut().set_files_scanned(cached.files_scanned);
+        self.as_mut().set_bytes_scanned(cached.bytes_scanned);
+        self.as_mut().set_skipped_entries(cached.skipped_entries);
+        self.as_mut().set_has_report(true);
+        self.as_mut().set_status(QString::from(&cached.status));
+    }
+
+    fn active_is_visible(&self) -> bool {
+        self.active_volume_id.is_some() && self.active_volume_id == self.visible_volume_id
+    }
+
     fn render_map(
         self: Pin<&mut Self>,
         width: f64,
@@ -618,40 +750,32 @@ impl qobject::Controller {
     fn apply_update(mut self: Pin<&mut Self>, update: UiUpdate) {
         match update {
             UiUpdate::Map { full, bins } => {
-                if full {
-                    self.as_mut().rust_mut().map_bins = bins;
-                } else {
-                    for bin in bins {
-                        match self
-                            .map_bins
-                            .binary_search_by_key(&bin.offset_bytes, |item| item.offset_bytes)
-                        {
-                            Ok(index) => self.as_mut().rust_mut().map_bins[index] = bin,
-                            Err(index) => self.as_mut().rust_mut().map_bins.insert(index, bin),
-                        }
-                    }
+                merge_map_bins(&mut self.as_mut().rust_mut().active_map_bins, full, bins);
+                if self.active_is_visible() {
+                    self.as_mut().rust_mut().map_bins = self.active_map_bins.clone();
+                    let revision = self.map_revision.wrapping_add(1);
+                    self.as_mut().set_map_revision(revision);
                 }
-                let revision = self.map_revision.wrapping_add(1);
-                self.as_mut().set_map_revision(revision);
             }
             UiUpdate::Progress {
                 files,
                 bytes,
                 detail,
             } => {
-                self.as_mut().set_files_scanned(files as f64);
-                self.as_mut().set_bytes_scanned(bytes as f64);
-                self.as_mut().set_status(QString::from(&detail));
+                self.as_mut().rust_mut().active_files_scanned = files as f64;
+                self.as_mut().rust_mut().active_bytes_scanned = bytes as f64;
+                self.as_mut().rust_mut().active_status = detail.clone();
+                if self.active_is_visible() {
+                    self.as_mut().set_files_scanned(files as f64);
+                    self.as_mut().set_bytes_scanned(bytes as f64);
+                    self.as_mut().set_status(QString::from(&detail));
+                }
             }
             UiUpdate::Finished {
                 analysis_id,
                 report,
             } => {
-                let file_row_count = count_i32(report.file_rows.len());
-                let report_volume_id = QString::from(&report.volume_id.0.to_string());
-                let status = QString::from(&report.status);
-
-                self.as_mut().rust_mut().analysis_id = Some(analysis_id);
+                let volume_id = report.volume_id;
                 let ranges = report
                     .map_files
                     .iter()
@@ -670,41 +794,80 @@ impl qobject::Controller {
                 for file in &mut map_files {
                     file.physical_ranges.clear();
                 }
-                self.as_mut().rust_mut().map_bins = report.map_bins;
-                self.as_mut().rust_mut().file_rows = report.file_rows;
-                self.as_mut().rust_mut().map_files = map_files;
-                self.as_mut().rust_mut().map_file_ranges = Arc::new(ranges);
+                let cached = CachedAnalysis {
+                    analysis_id,
+                    fragmented_basis_points: report.fragmented_basis_points,
+                    coverage_basis_points: report.coverage_basis_points,
+                    files_scanned: report.files_scanned,
+                    bytes_scanned: report.bytes_scanned,
+                    skipped_entries: report.skipped_entries,
+                    status: report.status,
+                    map_bins: report.map_bins,
+                    file_rows: report.file_rows,
+                    map_files,
+                    map_file_ranges: Arc::new(ranges),
+                };
+                self.as_mut().rust_mut().analyses.insert(volume_id, cached);
+                let analysis_revision = self.analysis_revision.wrapping_add(1);
+                self.as_mut().set_analysis_revision(analysis_revision);
                 self.as_mut().rust_mut().worker = None;
-                let map_revision = self.map_revision.wrapping_add(1);
-                self.as_mut().set_map_revision(map_revision);
-                self.as_mut().set_report_volume_id(report_volume_id);
-                self.as_mut()
-                    .set_fragmented_basis_points(report.fragmented_basis_points);
-                self.as_mut()
-                    .set_coverage_basis_points(report.coverage_basis_points);
-                self.as_mut().set_file_row_count(file_row_count);
-                self.as_mut().set_files_scanned(report.files_scanned);
-                self.as_mut().set_bytes_scanned(report.bytes_scanned);
-                self.as_mut().set_skipped_entries(report.skipped_entries);
-                self.as_mut().set_has_report(true);
+                self.as_mut().rust_mut().active_volume_id = None;
+                self.as_mut().rust_mut().active_map_bins.clear();
+                self.as_mut().rust_mut().active_status.clear();
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
-                self.as_mut().set_status(status);
+                self.as_mut().set_analyzing_volume_id(QString::default());
+                if self.visible_volume_id == Some(volume_id) {
+                    self.as_mut().display_volume(volume_id);
+                }
             }
             UiUpdate::Cancelled => {
+                let active_volume_id = self.active_volume_id;
                 self.as_mut().rust_mut().worker = None;
+                self.as_mut().rust_mut().active_volume_id = None;
+                self.as_mut().rust_mut().active_map_bins.clear();
+                self.as_mut().rust_mut().active_status.clear();
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
-                self.as_mut()
-                    .set_status(QString::from("Analysis cancelled"));
+                self.as_mut().set_analyzing_volume_id(QString::default());
+                if let Some(volume_id) = active_volume_id
+                    && Some(volume_id) == self.visible_volume_id
+                {
+                    self.as_mut().display_volume(volume_id);
+                    self.as_mut()
+                        .set_status(QString::from("Analysis cancelled"));
+                }
             }
             UiUpdate::Failed(message) => {
+                let active_volume_id = self.active_volume_id;
                 self.as_mut().rust_mut().worker = None;
+                self.as_mut().rust_mut().active_volume_id = None;
+                self.as_mut().rust_mut().active_map_bins.clear();
+                self.as_mut().rust_mut().active_status.clear();
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
-                self.as_mut()
-                    .set_status(QString::from(&format!("Analysis failed: {message}")));
+                self.as_mut().set_analyzing_volume_id(QString::default());
+                if let Some(volume_id) = active_volume_id
+                    && Some(volume_id) == self.visible_volume_id
+                {
+                    self.as_mut().display_volume(volume_id);
+                    self.as_mut()
+                        .set_status(QString::from(&format!("Analysis failed: {message}")));
+                }
             }
+        }
+    }
+}
+
+fn merge_map_bins(target: &mut Vec<MapBin>, full: bool, bins: Vec<MapBin>) {
+    if full {
+        *target = bins;
+        return;
+    }
+    for bin in bins {
+        match target.binary_search_by_key(&bin.offset_bytes, |item| item.offset_bytes) {
+            Ok(index) => target[index] = bin,
+            Err(index) => target.insert(index, bin),
         }
     }
 }
