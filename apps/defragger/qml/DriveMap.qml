@@ -237,21 +237,8 @@ Item {
             const coverage = field(index, (offset + 4 - 16) / 2)
             if (fileIndex !== 4294967295 && coverage > 0) {
                 items.push({
-                    kind: qsTr("File"),
-                    label: String(detailsProvider.file_path(fileIndex)),
-                    value: coverage,
-                    color: "#dc4f4a"
-                })
-            }
-        }
-        for (let i = 0; i < metadataTypes.length; ++i) {
-            const coverage = field(index, 4 + i)
-            if (coverage > 0) {
-                items.push({
-                    kind: qsTr("Metadata"),
-                    label: metadataTypes[i][1],
-                    value: coverage,
-                    color: metadataTypes[i][2]
+                    label: String(detailsProvider.map_file_path(fileIndex)),
+                    value: coverage
                 })
             }
         }
@@ -473,7 +460,7 @@ Item {
                     Controls.Label {
                         Layout.fillWidth: true
                         visible: hoverTip.related.length > 0
-                        text: qsTr("Related in this block")
+                        text: qsTr("Files in this block")
                         font.bold: true
                     }
                     Repeater {
@@ -482,16 +469,10 @@ Item {
                             required property var modelData
                             Layout.fillWidth: true
                             spacing: Kirigami.Units.smallSpacing
-                            Rectangle {
-                                Layout.preferredWidth: 8
-                                Layout.preferredHeight: 8
-                                radius: 4
-                                color: modelData.color
-                            }
-                            Controls.Label {
-                                Layout.preferredWidth: 64
-                                text: modelData.kind
-                                color: Kirigami.Theme.disabledTextColor
+                            Kirigami.Icon {
+                                source: "document"
+                                Layout.preferredWidth: 16
+                                Layout.preferredHeight: 16
                             }
                             Controls.Label {
                                 Layout.fillWidth: true

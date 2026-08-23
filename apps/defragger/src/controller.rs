@@ -65,6 +65,8 @@ mod qobject {
         #[qinvokable]
         fn file_path(self: &Controller, index: i32) -> QString;
         #[qinvokable]
+        fn map_file_path(self: &Controller, index: i32) -> QString;
+        #[qinvokable]
         fn file_physical_runs(self: &Controller, index: i32) -> i32;
         #[qinvokable]
         fn file_excess_runs(self: &Controller, index: i32) -> i32;
@@ -88,7 +90,10 @@ mod qobject {
 
 use std::{
     pin::Pin,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Sender},
+    },
     time::Duration,
 };
 
@@ -96,7 +101,7 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QString};
 use defrag_domain::{
     AnalysisId, AnalysisReport, CategoryMix, DefragPolicy, FileReport, MapBin, MetadataMix,
-    PlanCandidate, ServiceEvent, SupportStatus, Volume, VolumeId,
+    PhysicalRange, PlanCandidate, ServiceEvent, SupportStatus, Volume, VolumeId,
 };
 #[cfg(all(feature = "development-service", not(feature = "system-helper")))]
 use defrag_service::DevelopmentClient as AppClient;
@@ -114,6 +119,12 @@ const MAP_RECORD_BYTES: usize = MAP_CATEGORY_BYTES + MAP_CONTRIBUTOR_BYTES * MAX
 struct MapContributor {
     file_index: u32,
     coverage_basis_points: u16,
+}
+
+#[derive(Clone, Copy)]
+struct MapFileRange {
+    file_index: usize,
+    physical: PhysicalRange,
 }
 
 impl Default for MapContributor {
@@ -159,6 +170,7 @@ struct UiReport {
     status: String,
     map_bins: Vec<MapBin>,
     file_rows: Vec<FileReport>,
+    map_files: Vec<FileReport>,
 }
 
 pub struct ControllerRust {
@@ -187,6 +199,8 @@ pub struct ControllerRust {
     volumes: Vec<Volume>,
     map_bins: Vec<MapBin>,
     file_rows: Vec<FileReport>,
+    map_files: Vec<FileReport>,
+    map_file_ranges: Arc<Vec<MapFileRange>>,
     plan_candidates: Vec<PlanCandidate>,
 }
 
@@ -218,6 +232,8 @@ impl Default for ControllerRust {
             volumes: Vec::new(),
             map_bins: Vec::new(),
             file_rows: Vec::new(),
+            map_files: Vec::new(),
+            map_file_ranges: Arc::default(),
             plan_candidates: Vec::new(),
         }
     }
@@ -300,6 +316,8 @@ impl qobject::Controller {
             .set_map_volume_id(QString::from(&volume_id.to_string()));
         self.as_mut().rust_mut().map_bins.clear();
         self.as_mut().rust_mut().file_rows.clear();
+        self.as_mut().rust_mut().map_files.clear();
+        self.as_mut().rust_mut().map_file_ranges = Arc::default();
         self.as_mut().rust_mut().plan_candidates.clear();
         let revision = self.map_revision.wrapping_add(1);
         self.as_mut().set_map_revision(revision);
@@ -502,6 +520,15 @@ impl qobject::Controller {
         })
     }
 
+    fn map_file_path(&self, index: i32) -> QString {
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| self.map_files.get(index))
+            .map_or_else(QString::default, |file| {
+                QString::from(&file.path.display().to_string())
+            })
+    }
+
     fn file_physical_runs(&self, index: i32) -> i32 {
         self.file_row(index)
             .map_or(0, |file| count_i32(file.physical_runs as usize))
@@ -560,10 +587,10 @@ impl qobject::Controller {
         } else {
             Vec::new()
         };
-        let files = if use_analysis {
-            self.file_rows.clone()
+        let file_ranges = if use_analysis {
+            Arc::clone(&self.map_file_ranges)
         } else {
-            Vec::new()
+            Arc::default()
         };
         let width = dimension(width);
         let height = dimension(height);
@@ -571,7 +598,7 @@ impl qobject::Controller {
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let bins = aggregate_map(&source, capacity_bytes, width, height);
-            let contributors = file_contributors(&bins, &files);
+            let contributors = file_contributors(&bins, &file_ranges);
             let bytes = encode_map(&bins, &contributors);
             let data = QByteArray::from(bytes.as_slice());
             let _ = qt_thread.queue(move |mut controller| {
@@ -618,8 +645,28 @@ impl qobject::Controller {
                 let status = QString::from(&report.status);
 
                 self.as_mut().rust_mut().analysis_id = Some(analysis_id);
+                let ranges = report
+                    .map_files
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(file_index, file)| {
+                        file.physical_ranges
+                            .iter()
+                            .copied()
+                            .map(move |physical| MapFileRange {
+                                file_index,
+                                physical,
+                            })
+                    })
+                    .collect();
+                let mut map_files = report.map_files;
+                for file in &mut map_files {
+                    file.physical_ranges.clear();
+                }
                 self.as_mut().rust_mut().map_bins = report.map_bins;
                 self.as_mut().rust_mut().file_rows = report.file_rows;
+                self.as_mut().rust_mut().map_files = map_files;
+                self.as_mut().rust_mut().map_file_ranges = Arc::new(ranges);
                 self.as_mut().rust_mut().worker = None;
                 let map_revision = self.map_revision.wrapping_add(1);
                 self.as_mut().set_map_revision(map_revision);
@@ -655,7 +702,7 @@ impl qobject::Controller {
     }
 }
 
-fn prepare_ui_report(mut report: Box<AnalysisReport>) -> UiReport {
+fn prepare_ui_report(report: Box<AnalysisReport>) -> UiReport {
     let status =
         if report.coverage.skipped_entries > 0 {
             report.warnings.last().cloned().unwrap_or_else(|| {
@@ -664,7 +711,16 @@ fn prepare_ui_report(mut report: Box<AnalysisReport>) -> UiReport {
         } else {
             String::new()
         };
-    report.files.retain(|file| file.excess_runs > 0);
+    let map_files = report.files;
+    let file_rows = map_files
+        .iter()
+        .filter(|file| file.excess_runs > 0)
+        .cloned()
+        .map(|mut file| {
+            file.physical_ranges.clear();
+            file
+        })
+        .collect();
     UiReport {
         volume_id: report.volume.id,
         fragmented_basis_points: optional_basis_points(
@@ -676,7 +732,8 @@ fn prepare_ui_report(mut report: Box<AnalysisReport>) -> UiReport {
         skipped_entries: report.coverage.skipped_entries as f64,
         status,
         map_bins: report.map,
-        file_rows: report.files,
+        file_rows,
+        map_files,
     }
 }
 
@@ -714,34 +771,30 @@ fn encode_map(bins: &[MapBin], contributors: &[[MapContributor; MAX_MAP_CONTRIBU
 
 fn file_contributors(
     bins: &[MapBin],
-    files: &[FileReport],
+    file_ranges: &[MapFileRange],
 ) -> Vec<[MapContributor; MAX_MAP_CONTRIBUTORS]> {
     let mut overlaps = vec![Vec::<(usize, u64)>::new(); bins.len()];
 
-    for (file_index, file) in files.iter().enumerate() {
-        if u32::try_from(file_index).is_err() {
-            break;
+    for entry in file_ranges {
+        if u32::try_from(entry.file_index).is_err() || entry.physical.length_bytes == 0 {
+            continue;
         }
-        for range in &file.physical_ranges {
-            let range_end = range.offset_bytes.saturating_add(range.length_bytes);
-            if range.length_bytes == 0 {
-                continue;
+        let range = entry.physical;
+        let range_end = range.offset_bytes.saturating_add(range.length_bytes);
+        let mut bin_index = bins.partition_point(|bin| {
+            bin.offset_bytes.saturating_add(bin.length_bytes) <= range.offset_bytes
+        });
+        while let Some(bin) = bins.get(bin_index) {
+            if bin.offset_bytes >= range_end {
+                break;
             }
-            let mut bin_index = bins.partition_point(|bin| {
-                bin.offset_bytes.saturating_add(bin.length_bytes) <= range.offset_bytes
-            });
-            while let Some(bin) = bins.get(bin_index) {
-                if bin.offset_bytes >= range_end {
-                    break;
-                }
-                let overlap = range_end
-                    .min(bin.offset_bytes.saturating_add(bin.length_bytes))
-                    .saturating_sub(range.offset_bytes.max(bin.offset_bytes));
-                if overlap > 0 {
-                    overlaps[bin_index].push((file_index, overlap));
-                }
-                bin_index += 1;
+            let overlap = range_end
+                .min(bin.offset_bytes.saturating_add(bin.length_bytes))
+                .saturating_sub(range.offset_bytes.max(bin.offset_bytes));
+            if overlap > 0 {
+                overlaps[bin_index].push((entry.file_index, overlap));
             }
+            bin_index += 1;
         }
     }
 
@@ -959,10 +1012,6 @@ fn metadata_values(metadata: MetadataMix) -> [u16; 9] {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
-    use defrag_domain::PhysicalRange;
-
     use super::*;
 
     #[test]
@@ -1050,42 +1099,31 @@ mod tests {
                 mix: CategoryMix::default(),
             },
         ];
-        let file = |path: &str, physical_ranges| FileReport {
-            path: PathBuf::from(path),
-            logical_bytes: 0,
-            allocated_bytes: 0,
-            physical_runs: 2,
-            minimum_runs: 1,
-            excess_runs: 1,
-            average_run_bytes: 0,
-            eligible_for_plan: true,
-            exclusion_reason: None,
-            physical_ranges,
-        };
-        let files = vec![
-            file(
-                "/large",
-                vec![PhysicalRange {
+        let file_ranges = vec![
+            MapFileRange {
+                file_index: 0,
+                physical: PhysicalRange {
                     offset_bytes: 10,
                     length_bytes: 80,
-                }],
-            ),
-            file(
-                "/split",
-                vec![
-                    PhysicalRange {
-                        offset_bytes: 0,
-                        length_bytes: 30,
-                    },
-                    PhysicalRange {
-                        offset_bytes: 100,
-                        length_bytes: 50,
-                    },
-                ],
-            ),
+                },
+            },
+            MapFileRange {
+                file_index: 1,
+                physical: PhysicalRange {
+                    offset_bytes: 0,
+                    length_bytes: 30,
+                },
+            },
+            MapFileRange {
+                file_index: 1,
+                physical: PhysicalRange {
+                    offset_bytes: 100,
+                    length_bytes: 50,
+                },
+            },
         ];
 
-        let contributors = file_contributors(&bins, &files);
+        let contributors = file_contributors(&bins, &file_ranges);
 
         assert_eq!(contributors[0][0].file_index, 0);
         assert_eq!(contributors[0][0].coverage_basis_points, 8_000);
