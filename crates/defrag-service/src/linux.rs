@@ -110,6 +110,10 @@ pub enum IoctlError {
     InvalidCount(&'static str),
     #[error("kernel mapping query did not advance")]
     DidNotAdvance,
+    #[error("kernel returned an invalid filesystem block size {0}")]
+    InvalidBlockSize(libc::c_int),
+    #[error("file is too large for the legacy FIBMAP interface")]
+    FileTooLargeForFibmap,
 }
 
 #[repr(C)]
@@ -244,6 +248,84 @@ pub fn fiemap(file: &File) -> Result<Vec<FileExtent>, IoctlError> {
             return Err(IoctlError::DidNotAdvance);
         }
         start = next;
+    }
+    Ok(result)
+}
+
+/// Return FAT-family file extents using FIEMAP when a kernel implements it,
+/// with the older FIBMAP interface as the compatibility path.
+///
+/// Linux currently exposes `bmap` rather than `fiemap` for its FAT and exFAT
+/// drivers. FIBMAP is intentionally capability-gated by the VFS, so callers
+/// must surface `EPERM` rather than treating it as an empty file.
+pub fn fat_file_extents(file: &File, logical_bytes: u64) -> Result<Vec<FileExtent>, IoctlError> {
+    match fiemap(file) {
+        Ok(extents) => Ok(extents),
+        Err(IoctlError::Io { source, .. })
+            if matches!(
+                source.raw_os_error(),
+                Some(libc::EOPNOTSUPP) | Some(libc::ENOTTY)
+            ) =>
+        {
+            fibmap(file, logical_bytes)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn fibmap(file: &File, logical_bytes: u64) -> Result<Vec<FileExtent>, IoctlError> {
+    // _IO(0x00, 2) and _IO(0x00, 1); direction and encoded size are both zero.
+    const FIGETBSZ: libc::c_ulong = 2;
+    const FIBMAP: libc::c_ulong = 1;
+
+    let mut block_size: libc::c_int = 0;
+    // SAFETY: block_size points to writable storage expected by FIGETBSZ.
+    if unsafe { libc::ioctl(file.as_raw_fd(), FIGETBSZ, &mut block_size) } < 0 {
+        return Err(IoctlError::Io {
+            operation: "FIGETBSZ",
+            source: io::Error::last_os_error(),
+        });
+    }
+    if block_size <= 0 {
+        return Err(IoctlError::InvalidBlockSize(block_size));
+    }
+    let block_size = block_size as u64;
+    let block_count = logical_bytes.div_ceil(block_size);
+    if block_count > libc::c_int::MAX as u64 {
+        return Err(IoctlError::FileTooLargeForFibmap);
+    }
+
+    let mut result: Vec<FileExtent> = Vec::new();
+    for logical_block in 0..block_count {
+        let mut physical_block = logical_block as libc::c_int;
+        // SAFETY: physical_block is an in/out integer as required by FIBMAP.
+        if unsafe { libc::ioctl(file.as_raw_fd(), FIBMAP, &mut physical_block) } < 0 {
+            return Err(IoctlError::Io {
+                operation: "FIBMAP (requires CAP_SYS_RAWIO)",
+                source: io::Error::last_os_error(),
+            });
+        }
+        if physical_block <= 0 {
+            continue;
+        }
+        let logical = logical_block.saturating_mul(block_size);
+        let physical = (physical_block as u64).saturating_mul(block_size);
+        if let Some(last) = result.last_mut()
+            && last.logical.saturating_add(last.length) == logical
+            && last.physical.saturating_add(last.length) == physical
+        {
+            last.length = last.length.saturating_add(block_size);
+        } else {
+            result.push(FileExtent {
+                logical,
+                physical,
+                length: block_size,
+                flags: 0,
+            });
+        }
+    }
+    if let Some(last) = result.last_mut() {
+        last.flags |= FIEMAP_EXTENT_LAST;
     }
     Ok(result)
 }

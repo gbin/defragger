@@ -2,7 +2,7 @@
 
 Defragger is a Plasma-first Linux filesystem analyzer written in Rust with a
 Qt Quick/Kirigami interface. The v0 release is deliberately read-only and
-supports mounted ext4 filesystems.
+supports mounted ext4, FAT12/16/32, and exFAT filesystems.
 
 It calls Linux filesystem ioctls directly. It does not execute `e4defrag`,
 `filefrag`, or any other filesystem utility.
@@ -38,7 +38,11 @@ QT_QPA_PLATFORM=wayland cargo run --package defragger
 
 The analyzer does not follow symbolic links or cross mount boundaries. In the
 single-process v0 build it reports only files readable by the current user and
-marks incomplete results as partial.
+marks incomplete results as partial. FAT and exFAT file fragmentation uses
+FIEMAP where available and Linux's capability-gated FIBMAP fallback otherwise;
+without `CAP_SYS_RAWIO`, files are reported as skipped. Because Linux does not
+expose a filesystem-wide allocation map for them, their map also leaves free
+space and filesystem metadata explicitly unknown.
 
 The adaptive block map updates while analysis proceeds. A 4,096-bin backend
 map is combined into as many fixed 9-pixel tiles as the available area can

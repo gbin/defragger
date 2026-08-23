@@ -9,6 +9,10 @@ filesystem backend does not depend on Qt or on that transport.
 - Mount discovery reads `/proc/self/mountinfo` and uses `statvfs(3)`.
 - ext4's physical allocation map comes from `FS_IOC_GETFSMAP`.
 - Per-file physical extents come from unsynchronized `FS_IOC_FIEMAP`.
+- FAT12/16/32 and exFAT share a file-mapping reader. It tries FIEMAP first and
+  falls back to FIBMAP, which Linux restricts to `CAP_SYS_RAWIO`. Linux also
+  does not provide their filesystem-wide allocation map, so unobserved space
+  remains unknown and those reports are marked partial.
 - `statx(2)` mount IDs keep traversal inside the selected mount.
 - No executable is spawned. Inaccessible files are counted and make the report
   explicitly partial.
@@ -42,7 +46,6 @@ The ext4 writer will use `EXT4_IOC_MOVE_EXT` and donor files directly. It will
 require a mounted read-write filesystem and authorization. There is deliberately
 no `pkexec`, shell command, `e4defrag`, or root GUI fallback.
 
-`FilesystemBackend`, `FilesystemAnalysis`, and `PreparedPlan` are the extension
-points for FAT and exFAT. Their readers and eventual writers can have different
-kernel/library implementations without leaking filesystem-specific details into
-the controller.
+`FilesystemBackend`, `FilesystemAnalysis`, and `PreparedPlan` keep filesystem
+details out of the controller. FAT and exFAT share their read path, while their
+future offline writers can still use different on-disk implementations.

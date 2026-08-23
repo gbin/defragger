@@ -133,6 +133,7 @@ struct UiReport {
     files_scanned: f64,
     bytes_scanned: f64,
     skipped_entries: f64,
+    status: String,
     map_bins: Vec<MapBin>,
     file_rows: Vec<FileReport>,
 }
@@ -257,7 +258,7 @@ impl qobject::Controller {
         self.as_mut().set_paused(false);
         self.as_mut().set_busy(true);
         self.as_mut()
-            .set_status(QString::from("Reading the ext4 allocation map…"));
+            .set_status(QString::from("Reading the filesystem allocation map…"));
 
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
@@ -536,6 +537,7 @@ impl qobject::Controller {
             } => {
                 let file_row_count = count_i32(report.file_rows.len());
                 let report_volume_id = QString::from(&report.volume_id.0.to_string());
+                let status = QString::from(&report.status);
 
                 self.as_mut().rust_mut().analysis_id = Some(analysis_id);
                 self.as_mut().rust_mut().map_bins = report.map_bins;
@@ -555,7 +557,7 @@ impl qobject::Controller {
                 self.as_mut().set_has_report(true);
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
-                self.as_mut().set_status(QString::default());
+                self.as_mut().set_status(status);
             }
             UiUpdate::Cancelled => {
                 self.as_mut().rust_mut().worker = None;
@@ -576,6 +578,14 @@ impl qobject::Controller {
 }
 
 fn prepare_ui_report(mut report: Box<AnalysisReport>) -> UiReport {
+    let status =
+        if report.coverage.skipped_entries > 0 {
+            report.warnings.last().cloned().unwrap_or_else(|| {
+                "Analysis is partial because some entries were skipped.".to_owned()
+            })
+        } else {
+            String::new()
+        };
     report.files.retain(|file| file.excess_runs > 0);
     UiReport {
         volume_id: report.volume.id,
@@ -586,6 +596,7 @@ fn prepare_ui_report(mut report: Box<AnalysisReport>) -> UiReport {
         files_scanned: report.coverage.files_scanned as f64,
         bytes_scanned: report.coverage.scanned_allocated_bytes as f64,
         skipped_entries: report.coverage.skipped_entries as f64,
+        status,
         map_bins: report.map,
         file_rows: report.files,
     }

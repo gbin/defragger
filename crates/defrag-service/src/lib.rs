@@ -1,4 +1,6 @@
+mod block_map;
 mod ext4;
+mod fat;
 mod linux;
 mod mounts;
 mod service;
@@ -43,5 +45,5 @@ pub trait PreparedPlan: Send + Sync {
 }
 
 pub fn default_backends() -> Vec<Arc<dyn FilesystemBackend>> {
-    vec![Arc::new(ext4::Ext4Backend)]
+    vec![Arc::new(ext4::Ext4Backend), Arc::new(fat::FatBackend)]
 }
