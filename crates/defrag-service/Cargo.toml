@@ -1,0 +1,11 @@
+[package]
+name = "defrag-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+defrag-domain = { path = "../defrag-domain" }
+libc.workspace = true
+thiserror.workspace = true

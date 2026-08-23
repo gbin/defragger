@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Defragger
+Comment=Analyze ext4 fragmentation and preview defragmentation plans
+Exec=defragger
+Icon=drive-harddisk
+Categories=System;Filesystem;Qt;KDE;
+Terminal=false
+StartupNotify=true

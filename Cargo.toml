@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/defrag-domain",
+    "crates/defrag-service",
+    "apps/defragger",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+libc = "0.2.175"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"

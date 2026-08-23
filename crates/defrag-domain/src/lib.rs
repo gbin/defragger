@@ -1,0 +1,228 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct VolumeId(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct JobId(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct AnalysisId(pub u64);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct PlanId(pub u64);
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SupportStatus {
+    ReadOnly,
+    Unsupported { reason: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Volume {
+    pub id: VolumeId,
+    pub mount_id: u64,
+    pub parent_mount_id: u64,
+    pub device_major: u32,
+    pub device_minor: u32,
+    pub mount_point: PathBuf,
+    pub source: String,
+    pub filesystem: String,
+    pub read_only: bool,
+    pub capacity_bytes: u64,
+    pub used_bytes: u64,
+    pub free_bytes: u64,
+    pub support: SupportStatus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum AnalysisCompleteness {
+    Complete,
+    Partial,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct MetadataMix {
+    pub filesystem_headers: u16,
+    pub journal: u16,
+    pub allocation_tables: u16,
+    pub file_metadata: u16,
+    pub group_descriptors: u16,
+    pub block_bitmaps: u16,
+    pub file_bitmaps: u16,
+    pub reserved: u16,
+    pub other: u16,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+pub struct CategoryMix {
+    pub free: u16,
+    pub contiguous_data: u16,
+    pub fragmented_data: u16,
+    pub unscanned_data: u16,
+    pub metadata: MetadataMix,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MapBin {
+    pub offset_bytes: u64,
+    pub length_bytes: u64,
+    pub mix: CategoryMix,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FileReport {
+    pub path: PathBuf,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+    pub physical_runs: u32,
+    pub minimum_runs: u32,
+    pub excess_runs: u32,
+    pub average_run_bytes: u64,
+    pub eligible_for_plan: bool,
+    pub exclusion_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScanCoverage {
+    pub files_scanned: u64,
+    pub directories_scanned: u64,
+    pub skipped_entries: u64,
+    pub scanned_allocated_bytes: u64,
+    pub total_allocated_data_bytes: u64,
+    pub estimated_basis_points: Option<u16>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FragmentationMetrics {
+    pub fragmented_files: u64,
+    pub fragmented_allocated_bytes: u64,
+    pub total_physical_runs: u64,
+    pub total_excess_runs: u64,
+    pub average_run_bytes: u64,
+    pub fragmented_basis_points: Option<u16>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AnalysisReport {
+    pub volume: Volume,
+    pub completeness: AnalysisCompleteness,
+    pub coverage: ScanCoverage,
+    pub fragmentation: FragmentationMetrics,
+    pub files: Vec<FileReport>,
+    pub map: Vec<MapBin>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct DefragPolicy {
+    pub minimum_excess_runs: u32,
+    pub minimum_file_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RequiredMountState {
+    MountedReadWrite,
+    MountedReadOnly,
+    Unmounted,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutionRequirements {
+    pub mount_state: RequiredMountState,
+    pub requires_privilege: bool,
+    pub available_in_this_build: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanCandidate {
+    pub path: PathBuf,
+    pub rewrite_bytes: u64,
+    pub current_runs: u32,
+    pub target_runs: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PlanSummary {
+    pub volume_id: VolumeId,
+    pub candidates: Vec<PlanCandidate>,
+    pub estimated_rewrite_bytes: u64,
+    pub excluded_files: u64,
+    pub warnings: Vec<String>,
+    pub requirements: ExecutionRequirements,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AnalysisPhase {
+    ReadingAllocationMap,
+    WalkingFiles,
+    BuildingReport,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JobProgress {
+    pub job_id: JobId,
+    pub phase: AnalysisPhase,
+    pub files_scanned: u64,
+    pub bytes_scanned: u64,
+    pub current_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServiceRequest {
+    ListVolumes,
+    StartAnalysis {
+        volume_id: VolumeId,
+    },
+    Pause {
+        job_id: JobId,
+    },
+    Resume {
+        job_id: JobId,
+    },
+    Cancel {
+        job_id: JobId,
+    },
+    BuildPlan {
+        analysis_id: AnalysisId,
+        policy: DefragPolicy,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServiceEvent {
+    Volumes(Vec<Volume>),
+    AnalysisStarted {
+        job_id: JobId,
+    },
+    Progress(JobProgress),
+    MapUpdated {
+        job_id: JobId,
+        full_snapshot: bool,
+        bins: Vec<MapBin>,
+    },
+    AnalysisFinished {
+        job_id: JobId,
+        analysis_id: AnalysisId,
+        report: Box<AnalysisReport>,
+    },
+    PlanFinished {
+        plan_id: PlanId,
+        summary: PlanSummary,
+    },
+    JobPaused {
+        job_id: JobId,
+    },
+    JobResumed {
+        job_id: JobId,
+    },
+    JobCancelled {
+        job_id: JobId,
+    },
+    Failed {
+        job_id: Option<JobId>,
+        message: String,
+    },
+}
