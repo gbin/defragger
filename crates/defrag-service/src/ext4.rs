@@ -853,7 +853,15 @@ fn refresh_report_map(
     events: &dyn EventSink,
 ) -> Result<(), ServiceError> {
     let root_file = File::open(root)?;
-    let ranges = linux::fsmap(&root_file)?;
+    let ranges = linux::fsmap(&root_file).map_err(|error| match &error {
+        linux::IoctlError::Io { source, .. } if source.raw_os_error() == Some(libc::EBADMSG) => {
+            ServiceError::UnsafeFilesystem(
+                "the kernel rejected the ext4 allocation map because filesystem metadata is inconsistent; keep the volume unmounted and run e2fsck"
+                    .to_owned(),
+            )
+        }
+        _ => ServiceError::Kernel(error),
+    })?;
     let mut bins = BinAccumulator::new(&ranges, report.volume.capacity_bytes, 4096);
     for file in &report.files {
         let fragmented = file.excess_runs > 0;

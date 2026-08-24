@@ -26,6 +26,8 @@ Item {
     readonly property int recordBytes: 74
     readonly property int contributorOffset: 44
     readonly property int maxContributors: 5
+    readonly property color readActivityColor: "#4fc3f7"
+    readonly property color writeActivityColor: "#ffd166"
 
     signal rebuildRequested(
         real width,
@@ -63,6 +65,11 @@ Item {
         [qsTr("Descriptors"), "#d4b33f"],
         [qsTr("Block bitmap"), "#38b9c7"],
         [qsTr("File bitmap"), "#d56da1"]
+    ]
+
+    readonly property var activityLegendTypes: [
+        [qsTr("Reading"), readActivityColor],
+        [qsTr("Writing"), writeActivityColor]
     ]
 
     function percent(value) {
@@ -405,12 +412,12 @@ Item {
                 ctx.strokeRect(x + 0.5, y + 0.5, layout.cell - 1, layout.cell - 1)
                 const activity = root.activityKind(i)
                 if (activity & 1) {
-                    ctx.strokeStyle = "#25a7e8"
+                    ctx.strokeStyle = root.readActivityColor
                     ctx.lineWidth = 2
                     ctx.strokeRect(x + 0.5, y + 0.5, layout.cell - 1, layout.cell - 1)
                 }
                 if (activity & 2) {
-                    ctx.strokeStyle = "#f59e32"
+                    ctx.strokeStyle = root.writeActivityColor
                     ctx.lineWidth = 2
                     const inset = activity & 1 ? 2.5 : 0.5
                     ctx.strokeRect(
@@ -496,6 +503,20 @@ Item {
                         text: root.hoveredIndex >= 0
                             ? qsTr("Block size: %1").arg(root.bytes(root.uint64(root.hoveredIndex, 8)))
                             : ""
+                    }
+                    Controls.Label {
+                        Layout.fillWidth: true
+                        visible: root.hoveredIndex >= 0
+                            && root.activityKind(root.hoveredIndex) !== 0
+                        text: {
+                            const activity = root.hoveredIndex >= 0
+                                ? root.activityKind(root.hoveredIndex) : 0
+                            if (activity === 3)
+                                return qsTr("Active: reading and writing")
+                            return activity === 1
+                                ? qsTr("Active: reading") : qsTr("Active: writing")
+                        }
+                        font.bold: true
                     }
 
                     Repeater {
@@ -604,6 +625,30 @@ Item {
             }
         }
 
+        Component {
+            id: activityLegendEntry
+
+            RowLayout {
+                required property var modelData
+                spacing: Kirigami.Units.smallSpacing
+
+                Rectangle {
+                    Layout.preferredWidth: 11
+                    Layout.preferredHeight: 11
+                    Layout.alignment: Qt.AlignVCenter
+                    radius: 2
+                    color: "transparent"
+                    border.color: modelData[1]
+                    border.width: 2
+                }
+                Controls.Label {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: modelData[0]
+                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                }
+            }
+        }
+
         RowLayout {
             id: legendRow
             anchors.left: parent.left
@@ -617,6 +662,23 @@ Item {
                 Repeater {
                     model: root.dataLegendTypes
                     delegate: legendEntry
+                }
+            }
+
+
+            Rectangle {
+                Layout.preferredWidth: 1
+                Layout.preferredHeight: metadataLegend.implicitHeight
+                Layout.alignment: Qt.AlignVCenter
+                color: Kirigami.Theme.disabledTextColor
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignVCenter
+                spacing: Kirigami.Units.largeSpacing * 2
+                Repeater {
+                    model: root.activityLegendTypes
+                    delegate: activityLegendEntry
                 }
             }
 

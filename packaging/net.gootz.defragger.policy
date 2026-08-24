@@ -17,8 +17,8 @@
   </action>
 
   <action id="net.gootz.defragger.modify-filesystem">
-    <description>Defragment files on a disk</description>
-    <message>Authentication is required to modify file allocation on disks</message>
+    <description>Modify a filesystem</description>
+    <message>Authentication is required to modify filesystems</message>
     <defaults>
       <allow_any>no</allow_any>
       <allow_inactive>no</allow_inactive>

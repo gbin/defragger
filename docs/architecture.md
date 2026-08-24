@@ -75,8 +75,12 @@ The clients never run as root. `StartDefrag` uses the separate
 revalidates every candidate immediately before operating on it.
 
 The ext4 writer uses unlinked donor files and `EXT4_IOC_MOVE_EXT` directly. An
-offline ext4 volume is privately mounted in the job's mount namespace; offline
-analysis uses a clean, read-only `noload` mount. After each committed chunk,
+offline ext4 volume is privately mounted in the job's mount namespace. Offline
+analysis uses a clean, read-only `noload` mount; if journal recovery is needed,
+the helper requests modification authorization and privately mounts read-write
+to replay the journal before analysis. Ext4's on-disk error flag blocks every
+writable mount, and an `EBADMSG` allocation-map result is treated as filesystem
+corruption rather than a recoverable visualization failure. After each committed chunk,
 the donor's exchanged source blocks are released and FIEMAP/GETFSMAP are rerun
 before events are published. Cancellation is observed before a move or after
 this cleanup boundary. There is no shell command, `e4defrag`, or root GUI

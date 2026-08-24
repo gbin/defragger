@@ -109,7 +109,12 @@ Mounted FAT/exFAT file fragmentation uses FIEMAP where available and Linux's
 capability-gated FIBMAP fallback otherwise. Unmounted classic FAT is parsed
 directly, including its allocation tables and directory tree. The helper uses a bounded
 capability set for protected-file inspection, private mounts, and ext4 extent
-moves. Because Linux does not expose a
+moves. Clean offline ext4 volumes are analyzed through a read-only private
+mount. If an offline volume needs journal recovery, the helper requests the
+stronger modification authorization and replays it in a private read-write
+mount before analysis. A volume whose ext4 superblock is marked erroneous is
+rejected until it has been checked offline with `e2fsck`; allocation-map
+checksum failures also stop defragmentation immediately. Because Linux does not expose a
 filesystem-wide allocation map for mounted FAT/exFAT, that fallback map leaves
 free space and filesystem metadata explicitly unknown.
 

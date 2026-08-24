@@ -88,6 +88,33 @@ impl InProcessClient {
     }
 
     pub fn start_analysis(&self, volume_id: VolumeId) -> Result<JobHandle, ServiceError> {
+        self.start_analysis_inner(volume_id, false)
+    }
+
+    /// Starts analysis and permits a private read-write mount solely when an
+    /// offline ext4 journal must be replayed first. Callers must obtain
+    /// modification authorization before selecting this path.
+    pub fn start_analysis_allowing_recovery(
+        &self,
+        volume_id: VolumeId,
+    ) -> Result<JobHandle, ServiceError> {
+        self.start_analysis_inner(volume_id, true)
+    }
+
+    pub fn analysis_requires_recovery(&self, volume_id: VolumeId) -> Result<bool, ServiceError> {
+        let volumes = self.list_volumes()?;
+        let volume = volumes
+            .into_iter()
+            .find(|volume| volume.id == volume_id)
+            .ok_or(ServiceError::VolumeNotFound(volume_id))?;
+        mounts::ext4_needs_recovery(&volume)
+    }
+
+    fn start_analysis_inner(
+        &self,
+        volume_id: VolumeId,
+        allow_journal_recovery: bool,
+    ) -> Result<JobHandle, ServiceError> {
         let volumes = self.list_volumes()?;
         let volume = volumes
             .into_iter()
@@ -133,7 +160,7 @@ impl InProcessClient {
                 let mounted = if backend.analysis_access(&volume) == AnalysisAccess::RawDevice {
                     None
                 } else {
-                    match mounts::mount_for_job(&volume, false) {
+                    match mounts::mount_for_analysis(&volume, allow_journal_recovery) {
                         Ok(mounted) => Some(mounted),
                         Err(error) => {
                             let _ = sender.send(ServiceEvent::Failed {
@@ -147,6 +174,17 @@ impl InProcessClient {
                 let analysis_volume = mounted.as_ref().map_or(&volume, |mounted| &mounted.volume);
                 match backend.analyze(analysis_volume, job_id, thread_control.as_ref(), &sink) {
                     Ok(analysis) => {
+                        if volume.mount_state == defrag_domain::MountState::Unmounted
+                            && volume.filesystem == "ext4"
+                            && !analysis_volume.read_only
+                            && let Err(error) = mounts::validate_ext4_writable(&volume)
+                        {
+                            let _ = sender.send(ServiceEvent::Failed {
+                                job_id: Some(job_id),
+                                message: error.to_string(),
+                            });
+                            return;
+                        }
                         let analysis_id =
                             AnalysisId(inner.next_analysis.fetch_add(1, Ordering::Relaxed));
                         let report = analysis.report().clone();

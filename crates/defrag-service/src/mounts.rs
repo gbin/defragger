@@ -305,6 +305,9 @@ impl Drop for JobMount {
 }
 
 pub(crate) fn mount_for_job(volume: &Volume, writable: bool) -> Result<JobMount, ServiceError> {
+    if writable && volume.filesystem == "ext4" {
+        validate_ext4_writable(volume)?;
+    }
     if volume.mount_state != MountState::Unmounted {
         if writable && volume.mount_state != MountState::MountedReadWrite {
             return Err(ServiceError::Io(std::io::Error::new(
@@ -427,6 +430,19 @@ pub(crate) fn mount_for_job(volume: &Volume, writable: bool) -> Result<JobMount,
     Ok(mounted)
 }
 
+pub(crate) fn mount_for_analysis(
+    volume: &Volume,
+    allow_journal_recovery: bool,
+) -> Result<JobMount, ServiceError> {
+    let needs_recovery = volume.mount_state == MountState::Unmounted
+        && volume.filesystem == "ext4"
+        && ext4_needs_recovery(volume)?;
+    if needs_recovery && !allow_journal_recovery {
+        return Err(ext4_recovery_required());
+    }
+    mount_for_job(volume, needs_recovery)
+}
+
 fn operation_error(operation: &str, error: io::Error) -> ServiceError {
     ServiceError::Io(io::Error::new(
         error.kind(),
@@ -448,14 +464,34 @@ fn validate_block_device(volume: &Volume) -> Result<(), ServiceError> {
     Ok(())
 }
 
-fn validate_ext4_clean(volume: &Volume) -> Result<(), ServiceError> {
+pub(crate) fn ext4_needs_recovery(volume: &Volume) -> Result<bool, ServiceError> {
+    if volume.mount_state != MountState::Unmounted || volume.filesystem != "ext4" {
+        return Ok(false);
+    }
+    validate_block_device(volume)?;
     const EXT4_SUPER_OFFSET: u64 = 1024;
-    const EXT4_MAGIC_OFFSET: usize = 0x38;
-    const EXT4_FEATURE_INCOMPAT_OFFSET: usize = 0x60;
-    const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
     let file = fs::File::open(&volume.source)?;
     let mut superblock = [0u8; 1024];
     file.read_exact_at(&mut superblock, EXT4_SUPER_OFFSET)?;
+    let health = ext4_superblock_health(&superblock)?;
+    if health.has_errors {
+        return Err(ext4_filesystem_has_errors());
+    }
+    Ok(health.needs_recovery)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ext4Health {
+    needs_recovery: bool,
+    has_errors: bool,
+}
+
+fn ext4_superblock_health(superblock: &[u8; 1024]) -> Result<Ext4Health, ServiceError> {
+    const EXT4_MAGIC_OFFSET: usize = 0x38;
+    const EXT4_STATE_OFFSET: usize = 0x3a;
+    const EXT4_ERROR_FS: u16 = 0x0002;
+    const EXT4_FEATURE_INCOMPAT_OFFSET: usize = 0x60;
+    const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;
     let magic = u16::from_le_bytes([
         superblock[EXT4_MAGIC_OFFSET],
         superblock[EXT4_MAGIC_OFFSET + 1],
@@ -471,13 +507,50 @@ fn validate_ext4_clean(volume: &Volume) -> Result<(), ServiceError> {
             "the selected device no longer contains ext4",
         )));
     }
-    if incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0 {
-        return Err(ServiceError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "ext4 journal recovery is required; authorize defragmentation or mount the volume normally first",
-        )));
+    let state = u16::from_le_bytes([
+        superblock[EXT4_STATE_OFFSET],
+        superblock[EXT4_STATE_OFFSET + 1],
+    ]);
+    Ok(Ext4Health {
+        needs_recovery: incompat & EXT4_FEATURE_INCOMPAT_RECOVER != 0,
+        has_errors: state & EXT4_ERROR_FS != 0,
+    })
+}
+
+pub(crate) fn validate_ext4_writable(volume: &Volume) -> Result<(), ServiceError> {
+    if volume.filesystem != "ext4" {
+        return Ok(());
+    }
+    validate_block_device(volume)?;
+    const EXT4_SUPER_OFFSET: u64 = 1024;
+    let file = fs::File::open(&volume.source)?;
+    let mut superblock = [0u8; 1024];
+    file.read_exact_at(&mut superblock, EXT4_SUPER_OFFSET)?;
+    if ext4_superblock_health(&superblock)?.has_errors {
+        return Err(ext4_filesystem_has_errors());
     }
     Ok(())
+}
+
+fn ext4_filesystem_has_errors() -> ServiceError {
+    ServiceError::UnsafeFilesystem(
+        "ext4 is marked as containing errors; keep it unmounted and run e2fsck before analysis or defragmentation"
+            .to_owned(),
+    )
+}
+
+fn validate_ext4_clean(volume: &Volume) -> Result<(), ServiceError> {
+    if ext4_needs_recovery(volume)? {
+        return Err(ext4_recovery_required());
+    }
+    Ok(())
+}
+
+fn ext4_recovery_required() -> ServiceError {
+    ServiceError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "ext4 journal recovery is required; modification authorization is needed to replay it",
+    ))
 }
 
 #[cfg(test)]
@@ -498,5 +571,28 @@ mod tests {
     #[test]
     fn volume_ids_are_device_based() {
         assert_eq!(device_volume_id(8, 2), VolumeId((8_u64 << 32) | 2));
+    }
+
+    #[test]
+    fn detects_when_an_ext4_superblock_needs_journal_recovery() {
+        let mut superblock = [0_u8; 1024];
+        superblock[0x38..0x3a].copy_from_slice(&0xef53_u16.to_le_bytes());
+        assert_eq!(
+            ext4_superblock_health(&superblock).unwrap(),
+            Ext4Health {
+                needs_recovery: false,
+                has_errors: false
+            }
+        );
+
+        superblock[0x60..0x64].copy_from_slice(&0x0004_u32.to_le_bytes());
+        superblock[0x3a..0x3c].copy_from_slice(&0x0002_u16.to_le_bytes());
+        assert_eq!(
+            ext4_superblock_health(&superblock).unwrap(),
+            Ext4Health {
+                needs_recovery: true,
+                has_errors: true
+            }
+        );
     }
 }

@@ -69,7 +69,17 @@ impl Helper {
         #[zbus(header)] header: Header<'_>,
         #[zbus(connection)] connection: &Connection,
     ) -> fdo::Result<u64> {
-        let owner = self.authorize(connection, &header, ACTION_READ_ALL).await?;
+        let client = self.client.clone();
+        let requires_recovery =
+            blocking::unblock(move || client.analysis_requires_recovery(VolumeId(volume_id)))
+                .await
+                .map_err(failed)?;
+        let action = if requires_recovery {
+            ACTION_MODIFY
+        } else {
+            ACTION_READ_ALL
+        };
+        let owner = self.authorize(connection, &header, action).await?;
         let mut jobs = self
             .jobs
             .lock()
@@ -79,10 +89,13 @@ impl Helper {
                 "this client already has an active analysis".into(),
             ));
         }
-        let handle = self
-            .client
-            .start_analysis(VolumeId(volume_id))
-            .map_err(failed)?;
+        let handle = if requires_recovery {
+            self.client
+                .start_analysis_allowing_recovery(VolumeId(volume_id))
+        } else {
+            self.client.start_analysis(VolumeId(volume_id))
+        }
+        .map_err(failed)?;
         let job_id = handle.id().0;
         jobs.insert(
             job_id,
@@ -139,12 +152,7 @@ impl Helper {
                         },
                     );
             }
-            // The helper retains the full report for plan construction. The
-            // GUI only displays fragmented files, so do not send millions of
-            // irrelevant contiguous-file rows through the system bus.
-            if let ServiceEvent::AnalysisFinished { report, .. } = &mut event {
-                report.files.retain(|file| file.excess_runs > 0);
-            }
+            trim_report_for_transport(&mut event);
             let encoded = serde_json::to_string(&event).map_err(failed)?;
             if terminal {
                 jobs.remove(&job_id);
@@ -357,7 +365,7 @@ async fn authorize_policykit(
     details.insert(
         "polkit.message",
         if action == ACTION_MODIFY {
-            "Authenticate to modify file allocation on the selected disk"
+            "Authenticate to modify the selected filesystem"
         } else {
             "Authenticate to inspect all files on the selected disk"
         },
@@ -390,6 +398,19 @@ fn sender(header: &Header<'_>) -> fdo::Result<String> {
 
 fn failed(error: impl ToString) -> fdo::Error {
     fdo::Error::Failed(error.to_string())
+}
+
+/// The service retains complete analysis state for plan construction, while
+/// clients only render fragmented-file rows. Keep every terminal D-Bus reply
+/// bounded by dropping contiguous files from both analysis and defrag reports.
+fn trim_report_for_transport(event: &mut ServiceEvent) {
+    let report = match event {
+        ServiceEvent::AnalysisFinished { report, .. }
+        | ServiceEvent::DefragFinished { report, .. }
+        | ServiceEvent::DefragStopped { report, .. } => report,
+        _ => return,
+    };
+    report.files.retain(|file| file.excess_runs > 0);
 }
 
 pub fn run_system_helper() -> Result<(), Box<dyn std::error::Error>> {
@@ -429,4 +450,88 @@ pub fn run_development_helper(socket_path: &Path) -> Result<(), Box<dyn std::err
         Ok::<(), zbus::Error>(())
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use defrag_domain::{
+        AnalysisCompleteness, AnalysisReport, FileReport, FragmentationMetrics, JobId, MountState,
+        ScanCoverage, SupportStatus, Volume,
+    };
+
+    use super::*;
+
+    fn report() -> Box<AnalysisReport> {
+        let file = |excess_runs| FileReport {
+            path: PathBuf::from(format!("/{excess_runs}")),
+            logical_bytes: 1,
+            allocated_bytes: 1,
+            physical_runs: excess_runs + 1,
+            minimum_runs: 1,
+            excess_runs,
+            average_run_bytes: 1,
+            eligible_for_plan: excess_runs > 0,
+            exclusion_reason: None,
+            physical_ranges: Vec::new(),
+        };
+        Box::new(AnalysisReport {
+            volume: Volume {
+                id: VolumeId(1),
+                mount_id: None,
+                parent_mount_id: None,
+                device_major: 8,
+                device_minor: 1,
+                mount_point: None,
+                source: "/dev/test".into(),
+                filesystem: "ext4".into(),
+                label: None,
+                uuid: None,
+                mount_state: MountState::Unmounted,
+                read_only: false,
+                capacity_bytes: 1,
+                used_bytes: Some(1),
+                free_bytes: Some(0),
+                support: SupportStatus::Defragmentable,
+            },
+            completeness: AnalysisCompleteness::Complete,
+            coverage: ScanCoverage::default(),
+            fragmentation: FragmentationMetrics::default(),
+            files: vec![file(0), file(2)],
+            map: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn trims_every_terminal_report_for_dbus_transport() {
+        let mut events = [
+            ServiceEvent::AnalysisFinished {
+                job_id: JobId(1),
+                analysis_id: AnalysisId(1),
+                report: report(),
+            },
+            ServiceEvent::DefragFinished {
+                job_id: JobId(2),
+                report: report(),
+            },
+            ServiceEvent::DefragStopped {
+                job_id: JobId(3),
+                report: report(),
+            },
+        ];
+
+        for event in &mut events {
+            trim_report_for_transport(event);
+            let report = match event {
+                ServiceEvent::AnalysisFinished { report, .. }
+                | ServiceEvent::DefragFinished { report, .. }
+                | ServiceEvent::DefragStopped { report, .. } => report,
+                _ => unreachable!(),
+            };
+            assert_eq!(report.files.len(), 1);
+            assert_eq!(report.files[0].excess_runs, 2);
+        }
+    }
 }

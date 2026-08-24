@@ -19,6 +19,7 @@ mod qobject {
         #[qproperty(QString, map_volume_id)]
         #[qproperty(QString, report_volume_id)]
         #[qproperty(QString, analyzing_volume_id)]
+        #[qproperty(QString, active_operation)]
         #[qproperty(i32, volume_count)]
         #[qproperty(i32, map_revision)]
         #[qproperty(i32, analysis_revision)]
@@ -36,6 +37,10 @@ mod qobject {
         #[qproperty(f64, files_scanned)]
         #[qproperty(f64, bytes_scanned)]
         #[qproperty(f64, skipped_entries)]
+        #[qproperty(f64, defrag_files_completed)]
+        #[qproperty(f64, defrag_files_total)]
+        #[qproperty(f64, defrag_bytes_moved)]
+        #[qproperty(f64, defrag_bytes_total)]
         #[qproperty(f64, plan_estimated_rewrite_bytes)]
         type Controller = super::ControllerRust;
 
@@ -174,6 +179,13 @@ enum UiUpdate {
         bytes: u64,
         detail: String,
     },
+    OptimizationProgress {
+        files_completed: u64,
+        files_total: u64,
+        bytes_moved: u64,
+        bytes_total: u64,
+        detail: String,
+    },
     Finished {
         analysis_id: AnalysisId,
         report: UiReport,
@@ -187,11 +199,23 @@ enum UiUpdate {
         stopped: bool,
     },
     Cancelled,
-    Failed(String),
+    Failed {
+        operation: JobOperation,
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum JobOperation {
+    Analysis,
+    Defragmentation,
 }
 
 struct UiReport {
     volume_id: VolumeId,
+    capacity_bytes: u64,
+    used_bytes: Option<u64>,
+    free_bytes: Option<u64>,
     fragmented_basis_points: i32,
     coverage_basis_points: i32,
     files_scanned: f64,
@@ -225,6 +249,7 @@ pub struct ControllerRust {
     map_volume_id: QString,
     report_volume_id: QString,
     analyzing_volume_id: QString,
+    active_operation: QString,
     volume_count: i32,
     map_revision: i32,
     analysis_revision: i32,
@@ -242,6 +267,10 @@ pub struct ControllerRust {
     files_scanned: f64,
     bytes_scanned: f64,
     skipped_entries: f64,
+    defrag_files_completed: f64,
+    defrag_files_total: f64,
+    defrag_bytes_moved: f64,
+    defrag_bytes_total: f64,
     plan_estimated_rewrite_bytes: f64,
     client: Option<AppClient>,
     worker: Option<Sender<WorkerCommand>>,
@@ -271,6 +300,7 @@ impl Default for ControllerRust {
             map_volume_id: QString::default(),
             report_volume_id: QString::default(),
             analyzing_volume_id: QString::default(),
+            active_operation: QString::default(),
             volume_count: 0,
             map_revision: 0,
             analysis_revision: 0,
@@ -288,6 +318,10 @@ impl Default for ControllerRust {
             files_scanned: 0.0,
             bytes_scanned: 0.0,
             skipped_entries: 0.0,
+            defrag_files_completed: 0.0,
+            defrag_files_total: 0.0,
+            defrag_bytes_moved: 0.0,
+            defrag_bytes_total: 0.0,
             plan_estimated_rewrite_bytes: 0.0,
             client: None,
             worker: None,
@@ -390,6 +424,8 @@ impl qobject::Controller {
         self.as_mut().rust_mut().active_status = starting_status().to_owned();
         self.as_mut()
             .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
+        self.as_mut()
+            .set_active_operation(QString::from("analysis"));
         self.as_mut().set_paused(false);
         self.as_mut().set_busy(true);
         self.as_mut().display_volume(volume_id);
@@ -400,7 +436,10 @@ impl qobject::Controller {
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = qt_thread.queue(move |controller| {
-                        controller.apply_update(UiUpdate::Failed(error.to_string()))
+                        controller.apply_update(UiUpdate::Failed {
+                            operation: JobOperation::Analysis,
+                            message: error.to_string(),
+                        })
                     });
                     return;
                 }
@@ -444,7 +483,10 @@ impl qobject::Controller {
                         report: prepare_ui_report(report),
                     }),
                     Ok(ServiceEvent::JobCancelled { .. }) => Some(UiUpdate::Cancelled),
-                    Ok(ServiceEvent::Failed { message, .. }) => Some(UiUpdate::Failed(message)),
+                    Ok(ServiceEvent::Failed { message, .. }) => Some(UiUpdate::Failed {
+                        operation: JobOperation::Analysis,
+                        message,
+                    }),
                     Ok(_) => None,
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -452,7 +494,7 @@ impl qobject::Controller {
                 if let Some(update) = update {
                     let terminal = matches!(
                         update,
-                        UiUpdate::Finished { .. } | UiUpdate::Cancelled | UiUpdate::Failed(_)
+                        UiUpdate::Finished { .. } | UiUpdate::Cancelled | UiUpdate::Failed { .. }
                     );
                     if qt_thread
                         .queue(move |controller| controller.apply_update(update))
@@ -481,10 +523,11 @@ impl qobject::Controller {
     fn pause(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.worker {
             let _ = worker.send(WorkerCommand::Pause);
-            self.as_mut().rust_mut().active_status = "Analysis paused".to_owned();
+            let status = format!("{} paused", self.operation_title());
+            self.as_mut().rust_mut().active_status = status.clone();
             self.as_mut().set_paused(true);
             if self.active_is_visible() {
-                self.as_mut().set_status(QString::from("Analysis paused"));
+                self.as_mut().set_status(QString::from(&status));
             }
         }
     }
@@ -492,10 +535,11 @@ impl qobject::Controller {
     fn resume(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.worker {
             let _ = worker.send(WorkerCommand::Resume);
-            self.as_mut().rust_mut().active_status = "Analysis resumed".to_owned();
+            let status = format!("{} resumed", self.operation_title());
+            self.as_mut().rust_mut().active_status = status.clone();
             self.as_mut().set_paused(false);
             if self.active_is_visible() {
-                self.as_mut().set_status(QString::from("Analysis resumed"));
+                self.as_mut().set_status(QString::from(&status));
             }
         }
     }
@@ -503,10 +547,10 @@ impl qobject::Controller {
     fn stop(mut self: Pin<&mut Self>) {
         if let Some(worker) = &self.worker {
             let _ = worker.send(WorkerCommand::Cancel);
-            self.as_mut().rust_mut().active_status = "Stopping analysis…".to_owned();
+            let status = format!("Stopping {}…", self.operation_title().to_lowercase());
+            self.as_mut().rust_mut().active_status = status.clone();
             if self.active_is_visible() {
-                self.as_mut()
-                    .set_status(QString::from("Stopping analysis…"));
+                self.as_mut().set_status(QString::from(&status));
             }
         }
     }
@@ -581,14 +625,26 @@ impl qobject::Controller {
         let Some(volume_id) = self.visible_volume_id else {
             return;
         };
+        let files_total = self.plan_candidates.len() as f64;
+        let bytes_total = self.plan_estimated_rewrite_bytes;
+        let operation = if self.plan_is_compact {
+            "compaction"
+        } else {
+            "defragmentation"
+        };
         let (command_sender, command_receiver) = mpsc::channel();
         self.as_mut().rust_mut().worker = Some(command_sender);
         self.as_mut().rust_mut().active_volume_id = Some(volume_id);
         self.as_mut().rust_mut().active_map_bins = self.map_bins.clone();
         self.as_mut().set_busy(true);
         self.as_mut().set_paused(false);
+        self.as_mut().set_defrag_files_completed(0.0);
+        self.as_mut().set_defrag_files_total(files_total);
+        self.as_mut().set_defrag_bytes_moved(0.0);
+        self.as_mut().set_defrag_bytes_total(bytes_total);
         self.as_mut()
             .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
+        self.as_mut().set_active_operation(QString::from(operation));
         self.as_mut()
             .set_status(QString::from("Starting defragmentation…"));
 
@@ -598,7 +654,10 @@ impl qobject::Controller {
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = qt_thread.queue(move |controller| {
-                        controller.apply_update(UiUpdate::Failed(error.to_string()))
+                        controller.apply_update(UiUpdate::Failed {
+                            operation: JobOperation::Defragmentation,
+                            message: error.to_string(),
+                        })
                     });
                     return;
                 }
@@ -628,14 +687,18 @@ impl qobject::Controller {
                     Ok(ServiceEvent::DefragActivity {
                         reading, writing, ..
                     }) => Some(UiUpdate::Activity { reading, writing }),
-                    Ok(ServiceEvent::DefragProgress(progress)) => Some(UiUpdate::Progress {
-                        files: progress.files_completed,
-                        bytes: progress.bytes_moved,
-                        detail: progress
-                            .current_path
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| format!("{:?}", progress.phase)),
-                    }),
+                    Ok(ServiceEvent::DefragProgress(progress)) => {
+                        Some(UiUpdate::OptimizationProgress {
+                            files_completed: progress.files_completed,
+                            files_total: progress.files_total,
+                            bytes_moved: progress.bytes_moved,
+                            bytes_total: progress.bytes_total,
+                            detail: progress
+                                .current_path
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| format!("{:?}", progress.phase)),
+                        })
+                    }
                     Ok(ServiceEvent::DefragFinished { report, .. }) => {
                         Some(UiUpdate::DefragFinished {
                             report: prepare_ui_report(report),
@@ -649,7 +712,10 @@ impl qobject::Controller {
                         })
                     }
                     Ok(ServiceEvent::JobCancelled { .. }) => Some(UiUpdate::Cancelled),
-                    Ok(ServiceEvent::Failed { message, .. }) => Some(UiUpdate::Failed(message)),
+                    Ok(ServiceEvent::Failed { message, .. }) => Some(UiUpdate::Failed {
+                        operation: JobOperation::Defragmentation,
+                        message,
+                    }),
                     Ok(_) => None,
                     Err(mpsc::RecvTimeoutError::Timeout) => None,
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -657,7 +723,9 @@ impl qobject::Controller {
                 if let Some(update) = update {
                     let terminal = matches!(
                         update,
-                        UiUpdate::DefragFinished { .. } | UiUpdate::Cancelled | UiUpdate::Failed(_)
+                        UiUpdate::DefragFinished { .. }
+                            | UiUpdate::Cancelled
+                            | UiUpdate::Failed { .. }
                     );
                     if qt_thread
                         .queue(move |controller| controller.apply_update(update))
@@ -952,10 +1020,28 @@ impl qobject::Controller {
                     self.as_mut().set_status(QString::from(&detail));
                 }
             }
+            UiUpdate::OptimizationProgress {
+                files_completed,
+                files_total,
+                bytes_moved,
+                bytes_total,
+                detail,
+            } => {
+                self.as_mut()
+                    .set_defrag_files_completed(files_completed as f64);
+                self.as_mut().set_defrag_files_total(files_total as f64);
+                self.as_mut().set_defrag_bytes_moved(bytes_moved as f64);
+                self.as_mut().set_defrag_bytes_total(bytes_total as f64);
+                self.as_mut().rust_mut().active_status = detail.clone();
+                if self.active_is_visible() {
+                    self.as_mut().set_status(QString::from(&detail));
+                }
+            }
             UiUpdate::Finished {
                 analysis_id,
                 report,
             } => {
+                update_volume_occupancy(&mut self.as_mut().rust_mut().volumes, &report);
                 let (volume_id, cached) = cache_report(report, Some(analysis_id));
                 self.as_mut().rust_mut().analyses.insert(volume_id, cached);
                 let analysis_revision = self.analysis_revision.wrapping_add(1);
@@ -967,6 +1053,7 @@ impl qobject::Controller {
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
                 self.as_mut().set_analyzing_volume_id(QString::default());
+                self.as_mut().set_active_operation(QString::default());
                 if self.visible_volume_id == Some(volume_id) {
                     self.as_mut().display_volume(volume_id);
                 }
@@ -979,6 +1066,8 @@ impl qobject::Controller {
                 self.as_mut().set_activity_revision(revision);
             }
             UiUpdate::DefragFinished { report, stopped } => {
+                let operation = self.operation_title();
+                update_volume_occupancy(&mut self.as_mut().rust_mut().volumes, &report);
                 let (volume_id, cached) = cache_report(report, None);
                 self.as_mut().rust_mut().analyses.insert(volume_id, cached);
                 self.as_mut().rust_mut().worker = None;
@@ -989,19 +1078,21 @@ impl qobject::Controller {
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
                 self.as_mut().set_analyzing_volume_id(QString::default());
+                self.as_mut().set_active_operation(QString::default());
                 let analysis_revision = self.analysis_revision.wrapping_add(1);
                 self.as_mut().set_analysis_revision(analysis_revision);
                 if self.visible_volume_id == Some(volume_id) {
                     self.as_mut().display_volume(volume_id);
-                    self.as_mut().set_status(QString::from(if stopped {
-                        "Defragmentation stopped safely"
+                    self.as_mut().set_status(QString::from(&if stopped {
+                        format!("{operation} stopped safely")
                     } else {
-                        "Defragmentation complete"
+                        format!("{operation} complete")
                     }));
                 }
             }
             UiUpdate::Cancelled => {
                 let active_volume_id = self.active_volume_id;
+                let operation = self.operation_title();
                 self.as_mut().rust_mut().worker = None;
                 self.as_mut().rust_mut().active_volume_id = None;
                 self.as_mut().rust_mut().active_map_bins.clear();
@@ -1009,16 +1100,17 @@ impl qobject::Controller {
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
                 self.as_mut().set_analyzing_volume_id(QString::default());
+                self.as_mut().set_active_operation(QString::default());
                 self.as_mut().set_activity_data(QByteArray::default());
                 if let Some(volume_id) = active_volume_id
                     && Some(volume_id) == self.visible_volume_id
                 {
                     self.as_mut().display_volume(volume_id);
                     self.as_mut()
-                        .set_status(QString::from("Analysis cancelled"));
+                        .set_status(QString::from(&format!("{operation} cancelled")));
                 }
             }
-            UiUpdate::Failed(message) => {
+            UiUpdate::Failed { operation, message } => {
                 let active_volume_id = self.active_volume_id;
                 self.as_mut().rust_mut().worker = None;
                 self.as_mut().rust_mut().active_volume_id = None;
@@ -1027,15 +1119,28 @@ impl qobject::Controller {
                 self.as_mut().set_busy(false);
                 self.as_mut().set_paused(false);
                 self.as_mut().set_analyzing_volume_id(QString::default());
+                self.as_mut().set_active_operation(QString::default());
                 self.as_mut().set_activity_data(QByteArray::default());
                 if let Some(volume_id) = active_volume_id
                     && Some(volume_id) == self.visible_volume_id
                 {
                     self.as_mut().display_volume(volume_id);
+                    let operation = match operation {
+                        JobOperation::Analysis => "Analysis",
+                        JobOperation::Defragmentation => "Defragmentation",
+                    };
                     self.as_mut()
-                        .set_status(QString::from(&format!("Analysis failed: {message}")));
+                        .set_status(QString::from(&format!("{operation} failed: {message}")));
                 }
             }
+        }
+    }
+
+    fn operation_title(&self) -> &'static str {
+        match self.active_operation.to_string().as_str() {
+            "defragmentation" => "Defragmentation",
+            "compaction" => "Compaction",
+            _ => "Analysis",
         }
     }
 }
@@ -1076,6 +1181,17 @@ fn cache_report(report: UiReport, analysis_id: Option<AnalysisId>) -> (VolumeId,
             map_file_ranges: Arc::new(ranges),
         },
     )
+}
+
+fn update_volume_occupancy(volumes: &mut [Volume], report: &UiReport) {
+    if let Some(volume) = volumes
+        .iter_mut()
+        .find(|volume| volume.id == report.volume_id)
+    {
+        volume.capacity_bytes = report.capacity_bytes;
+        volume.used_bytes = report.used_bytes;
+        volume.free_bytes = report.free_bytes;
+    }
 }
 
 fn encode_activity(reading: &[PhysicalRange], writing: &[PhysicalRange]) -> Vec<u8> {
@@ -1125,6 +1241,9 @@ fn prepare_ui_report(report: Box<AnalysisReport>) -> UiReport {
         .collect();
     UiReport {
         volume_id: report.volume.id,
+        capacity_bytes: report.volume.capacity_bytes,
+        used_bytes: report.volume.used_bytes,
+        free_bytes: report.volume.free_bytes,
         fragmented_basis_points: optional_basis_points(
             report.fragmentation.fragmented_basis_points,
         ),

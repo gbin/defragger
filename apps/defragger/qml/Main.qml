@@ -23,7 +23,24 @@ Kirigami.ApplicationWindow {
         && selectedVolumeId === String(controller.report_volume_id)
     readonly property bool selectedIsBeingAnalyzed: hasSelectedVolume
         && controller.busy
+        && controller.active_operation === "analysis"
         && selectedVolumeId === String(controller.analyzing_volume_id)
+    readonly property bool selectedIsBeingOptimized: hasSelectedVolume
+        && controller.busy
+        && (controller.active_operation === "defragmentation"
+            || controller.active_operation === "compaction")
+        && selectedVolumeId === String(controller.analyzing_volume_id)
+    readonly property bool selectedIsActive: selectedIsBeingAnalyzed
+        || selectedIsBeingOptimized
+    readonly property real optimizationProgress: {
+        const files = controller.defrag_files_total > 0
+            ? controller.defrag_files_completed / controller.defrag_files_total : 0
+        const bytes = controller.defrag_bytes_total > 0
+            ? controller.defrag_bytes_moved / controller.defrag_bytes_total : 0
+        return Math.max(0, Math.min(1, Math.max(files, bytes)))
+    }
+    readonly property bool selectedJobFailed: controller.status.startsWith("Analysis failed:")
+        || controller.status.startsWith("Defragmentation failed:")
     onSelectedVolumeIdChanged: controller.select_volume(selectedVolumeId)
     function bytes(value) {
         if (!value) return "0 B"
@@ -106,8 +123,15 @@ Kirigami.ApplicationWindow {
                     delegate: Rectangle {
                         required property int index
                         readonly property string volumeId: controller.volume_id(index)
-                        readonly property double capacityBytes: controller.volume_capacity_bytes(index)
-                        readonly property double usedBytes: controller.volume_used_bytes(index)
+                        readonly property int statsRevision: controller.analysis_revision
+                        readonly property double capacityBytes: {
+                            const revision = statsRevision
+                            return controller.volume_capacity_bytes(index)
+                        }
+                        readonly property double usedBytes: {
+                            const revision = statsRevision
+                            return controller.volume_used_bytes(index)
+                        }
                         width: volumeList.width
                         height: 38
                         color: window.selectedIndex === index ? Kirigami.Theme.highlightColor : (index % 2 ? Kirigami.Theme.alternateBackgroundColor : Kirigami.Theme.backgroundColor)
@@ -120,7 +144,14 @@ Kirigami.ApplicationWindow {
                             Controls.Label { text: controller.volume_filesystem(index); Layout.preferredWidth: 80 }
                             Controls.Label { text: window.bytes(capacityBytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
                             Controls.Label { text: window.bytes(usedBytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
-                            Controls.Label { text: window.bytes(controller.volume_free_bytes(index)); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
+                            Controls.Label {
+                                text: {
+                                    const revision = statsRevision
+                                    return window.bytes(controller.volume_free_bytes(index))
+                                }
+                                Layout.preferredWidth: 85
+                                horizontalAlignment: Text.AlignRight
+                            }
                             Item {
                                 Layout.preferredWidth: 120
                                 Layout.preferredHeight: 16
@@ -155,7 +186,10 @@ Kirigami.ApplicationWindow {
                                 text: {
                                     const revision = controller.analysis_revision
                                     return controller.busy && String(controller.analyzing_volume_id) === volumeId
-                                        ? qsTr("Analyzing…")
+                                        ? (controller.active_operation === "compaction"
+                                            ? qsTr("Compacting…")
+                                            : (controller.active_operation === "defragmentation"
+                                                ? qsTr("Defragmenting…") : qsTr("Analyzing…")))
                                         : (controller.volume_has_report(index)
                                             ? qsTr("Analyzed")
                                             : (controller.volume_supported(index) ? "" : qsTr("Unsupported")))
@@ -219,20 +253,76 @@ Kirigami.ApplicationWindow {
                             text: controller.volume_count === 0
                                 && controller.status.length > 0
                                 ? qsTr("Unavailable")
-                                : (window.selectedIsBeingAnalyzed
+                                : (window.selectedJobFailed
+                                    ? qsTr("Operation failed")
+                                    : (window.selectedIsBeingOptimized
+                                    ? (controller.active_operation === "compaction"
+                                        ? qsTr("Compaction in progress")
+                                        : qsTr("Defragmentation in progress"))
+                                    : (window.selectedIsBeingAnalyzed
                                     ? qsTr("Analysis in progress")
                                     : (window.selectedHasReport
-                                        ? qsTr("Analysis complete") : qsTr("Ready")))
+                                        ? qsTr("Analysis complete") : qsTr("Ready")))))
                             font.bold: true
                         }
                         Controls.Label {
                             Layout.fillWidth: true
-                            visible: text.length > 0
-                            text: window.selectedIsBeingAnalyzed
-                                || controller.volume_count === 0 ? controller.status : ""
+                            visible: controller.status.length > 0
+                            text: controller.status
                             elide: Text.ElideMiddle
                             horizontalAlignment: Text.AlignRight
                             color: Kirigami.Theme.disabledTextColor
+                        }
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        visible: window.selectedIsBeingOptimized
+                        spacing: 2
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 10
+                            radius: height / 2
+                            color: Kirigami.Theme.alternateBackgroundColor
+                            border.width: 1
+                            border.color: Kirigami.Theme.disabledTextColor
+                            clip: true
+
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: parent.width * window.optimizationProgress
+                                radius: parent.radius
+                                color: Kirigami.Theme.highlightColor
+
+                                Behavior on width {
+                                    NumberAnimation {
+                                        duration: Kirigami.Units.shortDuration
+                                        easing.type: Easing.OutCubic
+                                    }
+                                }
+                            }
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Controls.Label {
+                                text: qsTr("%1 of %2 files")
+                                    .arg(window.integer(controller.defrag_files_completed))
+                                    .arg(window.integer(controller.defrag_files_total))
+                                color: Kirigami.Theme.disabledTextColor
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            }
+                            Controls.Label {
+                                Layout.fillWidth: true
+                                text: qsTr("%1 of %2 moved · %3%")
+                                    .arg(window.bytes(controller.defrag_bytes_moved))
+                                    .arg(window.bytes(controller.defrag_bytes_total))
+                                    .arg(Math.floor(window.optimizationProgress * 100))
+                                horizontalAlignment: Text.AlignRight
+                                color: Kirigami.Theme.disabledTextColor
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                            }
                         }
                     }
                     RowLayout {
@@ -242,12 +332,12 @@ Kirigami.ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             Controls.Label { text: qsTr("Files scanned"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
-                            Controls.Label { text: window.integer(window.selectedHasReport || window.selectedIsBeingAnalyzed ? controller.files_scanned : 0); font.bold: true }
+                            Controls.Label { text: window.integer(window.selectedHasReport || window.selectedIsActive ? controller.files_scanned : 0); font.bold: true }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
                             Controls.Label { text: qsTr("Allocated data"); color: Kirigami.Theme.disabledTextColor; font.pixelSize: Kirigami.Theme.smallFont.pixelSize }
-                            Controls.Label { text: window.bytes(window.selectedHasReport || window.selectedIsBeingAnalyzed ? controller.bytes_scanned : 0); font.bold: true }
+                            Controls.Label { text: window.bytes(window.selectedHasReport || window.selectedIsActive ? controller.bytes_scanned : 0); font.bold: true }
                         }
                         ColumnLayout {
                             Layout.fillWidth: true
