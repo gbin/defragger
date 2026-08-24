@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Controls as Controls
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
@@ -68,8 +69,11 @@ Kirigami.ApplicationWindow {
                 window.selectedIndex = volume_count - 1
         }
         onPlan_revisionChanged: {
-            if (plan_revision > 0)
-                planDialog.open()
+            if (plan_revision > 0) {
+                planWindow.show()
+                planWindow.raise()
+                planWindow.requestActivate()
+            }
         }
     }
 
@@ -467,38 +471,99 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    Controls.Dialog {
-        id: planDialog
-        anchors.centerIn: parent
-        width: Math.min(window.width - 80, 720)
-        height: Math.min(window.height - 80, 520)
-        modal: true
+    Window {
+        id: planWindow
+        width: 920
+        height: 620
+        minimumWidth: 680
+        minimumHeight: 420
+        transientParent: window
+        modality: Qt.WindowModal
+        flags: Qt.Dialog
+        color: Kirigami.Theme.backgroundColor
+        visible: false
         title: controller.plan_is_compact ? qsTr("Compaction plan preview") : qsTr("Defragmentation plan preview")
-        standardButtons: Controls.Dialog.Close
+
+        Shortcut { sequence: StandardKey.Cancel; onActivated: planWindow.close() }
+
         ColumnLayout {
             anchors.fill: parent
-            Controls.Label { text: controller.plan_is_compact ? qsTr("Compaction may move already-contiguous supporting files. The volume must remain unmounted.") : qsTr("The helper will revalidate every file before moving it."); font.bold: true; color: Kirigami.Theme.neutralTextColor; wrapMode: Text.Wrap }
-            Controls.Label { text: qsTr("%1 candidate files · %2 estimated rewrite").arg(window.integer(controller.plan_candidate_count)).arg(window.bytes(controller.plan_estimated_rewrite_bytes)); wrapMode: Text.Wrap }
+            anchors.margins: Kirigami.Units.largeSpacing
+            spacing: Kirigami.Units.smallSpacing
+
+            Controls.Label {
+                Layout.fillWidth: true
+                text: controller.plan_is_compact
+                    ? qsTr("Compaction may move already-contiguous supporting files. The volume must remain unmounted.")
+                    : qsTr("Each file is revalidated immediately before it is moved.")
+                font.bold: true
+                color: Kirigami.Theme.neutralTextColor
+                wrapMode: Text.Wrap
+            }
+            Controls.Label {
+                Layout.fillWidth: true
+                text: qsTr("%1 files · %2 → %3 fragments · %4 estimated rewrite")
+                    .arg(window.integer(controller.plan_candidate_count))
+                    .arg(window.integer(controller.plan_current_fragment_count))
+                    .arg(window.integer(controller.plan_target_fragment_count))
+                    .arg(window.bytes(controller.plan_estimated_rewrite_bytes))
+                wrapMode: Text.Wrap
+            }
+
+            Rectangle {
+                id: planHeader
+                readonly property int fragmentColumnWidth: 105
+                readonly property int roleColumnWidth: controller.plan_is_compact ? 135 : 0
+                readonly property int columnSpacing: Kirigami.Units.largeSpacing
+                Layout.fillWidth: true
+                Layout.preferredHeight: 34
+                color: Kirigami.Theme.alternateBackgroundColor
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: planHeader.columnSpacing
+                    Controls.Label { Layout.fillWidth: true; text: qsTr("File (relative to filesystem root)"); font.bold: true }
+                    Controls.Label { Layout.preferredWidth: planHeader.fragmentColumnWidth; text: qsTr("Fragments now"); font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Controls.Label { Layout.preferredWidth: planHeader.fragmentColumnWidth; text: qsTr("After"); font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Controls.Label { Layout.preferredWidth: planHeader.roleColumnWidth; visible: controller.plan_is_compact; text: qsTr("Role"); font.bold: true }
+                }
+            }
             ListView {
                 Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                 model: controller.plan_candidate_count
                 delegate: Controls.ItemDelegate {
                     required property int index
                     width: ListView.view.width
-                    text: controller.plan_candidate_path(index) + "  "
-                        + controller.plan_candidate_current_runs(index) + " → "
-                        + controller.plan_candidate_target_runs(index) + " " + qsTr("fragments")
-                        + (controller.plan_candidate_is_support(index) ? "  [" + qsTr("supporting move") + "]" : "")
+                    readonly property string candidatePath: controller.plan_candidate_path(index)
+                    Controls.ToolTip.visible: hovered
+                    Controls.ToolTip.text: candidatePath
+                    contentItem: RowLayout {
+                        spacing: planHeader.columnSpacing
+                        Controls.Label { Layout.fillWidth: true; text: candidatePath; elide: Text.ElideMiddle }
+                        Controls.Label { Layout.preferredWidth: planHeader.fragmentColumnWidth; text: window.integer(controller.plan_candidate_current_runs(index)); horizontalAlignment: Text.AlignRight }
+                        Controls.Label { Layout.preferredWidth: planHeader.fragmentColumnWidth; text: window.integer(controller.plan_candidate_target_runs(index)); horizontalAlignment: Text.AlignRight }
+                        Controls.Label {
+                            Layout.preferredWidth: planHeader.roleColumnWidth
+                            visible: controller.plan_is_compact
+                            text: controller.plan_candidate_is_support(index) ? qsTr("Supporting move") : qsTr("Defragment")
+                        }
+                    }
                 }
             }
-            Controls.Button {
-                Layout.alignment: Qt.AlignRight
-                text: controller.plan_is_compact ? qsTr("Start compaction") : qsTr("Start defragmentation")
-                icon.name: "media-playback-start"
-                enabled: controller.plan_candidate_count > 0 && !controller.busy
-                onClicked: {
-                    planDialog.close()
-                    controller.start_defrag()
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Controls.Button { text: qsTr("Close"); onClicked: planWindow.close() }
+                Controls.Button {
+                    text: controller.plan_is_compact ? qsTr("Start compaction") : qsTr("Start defragmentation")
+                    icon.name: "media-playback-start"
+                    enabled: controller.plan_candidate_count > 0 && !controller.busy
+                    onClicked: {
+                        planWindow.close()
+                        controller.start_defrag()
+                    }
                 }
             }
         }

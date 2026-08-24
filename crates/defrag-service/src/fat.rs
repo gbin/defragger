@@ -3,7 +3,7 @@ use std::{
     fs::{self, File, Metadata},
     io,
     os::unix::fs::{FileTypeExt, MetadataExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -223,7 +223,7 @@ fn analyze_mounted(
                     AnalysisPhase::WalkingFiles,
                     coverage.files_scanned,
                     coverage.scanned_allocated_bytes,
-                    Some(path),
+                    Some(user_visible_path(&path, mount_point)),
                 ));
                 last_ui_update = Instant::now();
             }
@@ -494,6 +494,14 @@ fn progress(
         files_scanned,
         bytes_scanned,
         current_path,
+    }
+}
+
+fn user_visible_path(path: &Path, root: &Path) -> PathBuf {
+    match path.strip_prefix(root) {
+        Ok(relative) if !relative.as_os_str().is_empty() => Path::new("/").join(relative),
+        Ok(relative) => relative.to_path_buf(),
+        Err(_) => path.to_path_buf(),
     }
 }
 

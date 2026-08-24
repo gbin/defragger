@@ -29,6 +29,8 @@ mod qobject {
         #[qproperty(i32, coverage_basis_points)]
         #[qproperty(i32, file_row_count)]
         #[qproperty(i32, plan_candidate_count)]
+        #[qproperty(f64, plan_current_fragment_count)]
+        #[qproperty(f64, plan_target_fragment_count)]
         #[qproperty(i32, plan_revision)]
         #[qproperty(bool, plan_is_compact)]
         #[qproperty(bool, busy)]
@@ -116,6 +118,7 @@ mod qobject {
 
 use std::{
     collections::HashMap,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc,
@@ -259,6 +262,8 @@ pub struct ControllerRust {
     coverage_basis_points: i32,
     file_row_count: i32,
     plan_candidate_count: i32,
+    plan_current_fragment_count: f64,
+    plan_target_fragment_count: f64,
     plan_revision: i32,
     plan_is_compact: bool,
     busy: bool,
@@ -310,6 +315,8 @@ impl Default for ControllerRust {
             coverage_basis_points: -1,
             file_row_count: 0,
             plan_candidate_count: 0,
+            plan_current_fragment_count: 0.0,
+            plan_target_fragment_count: 0.0,
             plan_revision: 0,
             plan_is_compact: false,
             busy: false,
@@ -585,6 +592,16 @@ impl qobject::Controller {
             Ok((plan_id, plan)) => {
                 let count = count_i32(plan.candidates.len());
                 let estimated_rewrite_bytes = plan.estimated_rewrite_bytes as f64;
+                let current_fragment_count = plan
+                    .candidates
+                    .iter()
+                    .map(|candidate| u64::from(candidate.current_runs))
+                    .sum::<u64>() as f64;
+                let target_fragment_count = plan
+                    .candidates
+                    .iter()
+                    .map(|candidate| u64::from(candidate.target_runs))
+                    .sum::<u64>() as f64;
                 self.as_mut().rust_mut().plan_candidates = plan.candidates;
                 self.as_mut().rust_mut().plan_id = Some(plan_id);
                 self.as_mut().set_plan_candidate_count(count);
@@ -592,6 +609,10 @@ impl qobject::Controller {
                     .set_plan_is_compact(mode == defrag_domain::OptimizationMode::Compact);
                 self.as_mut()
                     .set_plan_estimated_rewrite_bytes(estimated_rewrite_bytes);
+                self.as_mut()
+                    .set_plan_current_fragment_count(current_fragment_count);
+                self.as_mut()
+                    .set_plan_target_fragment_count(target_fragment_count);
                 let revision = self.plan_revision.wrapping_add(1).max(1);
                 self.as_mut().set_plan_revision(revision);
                 self.as_mut().set_status(QString::from(
@@ -849,7 +870,11 @@ impl qobject::Controller {
     fn plan_candidate_path(&self, index: i32) -> QString {
         self.plan_candidate(index)
             .map_or_else(QString::default, |candidate| {
-                QString::from(&candidate.path.display().to_string())
+                QString::from(
+                    &mount_relative_path(&candidate.path, None)
+                        .display()
+                        .to_string(),
+                )
             })
     }
 
@@ -901,6 +926,8 @@ impl qobject::Controller {
         self.as_mut().set_coverage_basis_points(-1);
         self.as_mut().set_file_row_count(0);
         self.as_mut().set_plan_candidate_count(0);
+        self.as_mut().set_plan_current_fragment_count(0.0);
+        self.as_mut().set_plan_target_fragment_count(0.0);
         self.as_mut().set_plan_revision(0);
         self.as_mut().set_has_report(false);
         self.as_mut().set_files_scanned(0.0);
@@ -1229,7 +1256,11 @@ fn prepare_ui_report(report: Box<AnalysisReport>) -> UiReport {
         } else {
             String::new()
         };
-    let map_files = report.files;
+    let mount_point = report.volume.mount_point.as_deref();
+    let mut map_files = report.files;
+    for file in &mut map_files {
+        file.path = mount_relative_path(&file.path, mount_point);
+    }
     let file_rows = map_files
         .iter()
         .filter(|file| file.excess_runs > 0)
@@ -1255,6 +1286,23 @@ fn prepare_ui_report(report: Box<AnalysisReport>) -> UiReport {
         map_bins: report.map,
         file_rows,
         map_files,
+    }
+}
+
+/// Return a stable path as the user sees it from the root of the selected
+/// filesystem. Analysis helpers may use a short-lived private mount, so an
+/// absolute host path is neither meaningful nor readable in the UI.
+fn mount_relative_path(path: &Path, mount_point: Option<&Path>) -> PathBuf {
+    let relative = mount_point
+        .and_then(|root| path.strip_prefix(root).ok())
+        .unwrap_or(path);
+
+    if relative.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else if relative.is_absolute() {
+        relative.to_path_buf()
+    } else {
+        Path::new("/").join(relative)
     }
 }
 
@@ -1537,6 +1585,21 @@ fn metadata_values(metadata: MetadataMix) -> [u16; 9] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_paths_are_relative_to_the_filesystem_root() {
+        assert_eq!(
+            mount_relative_path(
+                Path::new("/tmp/defragger-private/projects/file.bin"),
+                Some(Path::new("/tmp/defragger-private")),
+            ),
+            PathBuf::from("/projects/file.bin")
+        );
+        assert_eq!(
+            mount_relative_path(Path::new("projects/file.bin"), None),
+            PathBuf::from("/projects/file.bin")
+        );
+    }
 
     #[test]
     fn empty_source_becomes_not_analyzed_placeholders() {

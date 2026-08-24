@@ -210,7 +210,7 @@ impl FilesystemBackend for Ext4Backend {
                         AnalysisPhase::WalkingFiles,
                         coverage.files_scanned,
                         coverage.scanned_allocated_bytes,
-                        Some(path),
+                        Some(user_visible_path(&path, mount_point)),
                     ));
                     last_ui_update = Instant::now();
                 }
@@ -287,6 +287,20 @@ fn progress(
         files_scanned,
         bytes_scanned,
         current_path,
+    }
+}
+
+fn user_visible_path(path: &Path, root: &Path) -> PathBuf {
+    path.strip_prefix(root)
+        .map(user_visible_relative_path)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn user_visible_relative_path(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new("/").join(path)
     }
 }
 
@@ -501,6 +515,13 @@ impl FilesystemAnalysis for Ext4Analysis {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Paths crossing the service boundary are user-facing.  The analysis may
+        // run through a private mount under /tmp, which must not leak into the UI.
+        // Execution keeps its own relative-path copy below and re-resolves it
+        // against the freshly validated mount point.
+        for (candidate, relative_path) in candidates.iter_mut().zip(&relative_paths) {
+            candidate.path = relative_path.clone();
+        }
         Ok(Box::new(Ext4Plan {
             volume: self.report.volume.clone(),
             report: self.report.clone(),
@@ -586,7 +607,7 @@ fn execute_plan(
             files_total,
             bytes_moved,
             bytes_total,
-            current_path: Some(path.clone()),
+            current_path: Some(user_visible_relative_path(relative)),
         });
         let target = OpenOptions::new().read(true).write(true).open(&path)?;
         let metadata = target.metadata()?;
@@ -613,7 +634,7 @@ fn execute_plan(
             files_total,
             bytes_moved,
             bytes_total,
-            current_path: Some(path.clone()),
+            current_path: Some(user_visible_relative_path(relative)),
         });
         allocate_file(&donor, allocation_bytes)?;
         donor.sync_data()?;
@@ -643,7 +664,7 @@ fn execute_plan(
                 files_total,
                 bytes_moved,
                 bytes_total,
-                current_path: Some(path.clone()),
+                current_path: Some(user_visible_relative_path(relative)),
             });
 
             let moved_blocks =
@@ -671,7 +692,7 @@ fn execute_plan(
                 files_total,
                 bytes_moved,
                 bytes_total,
-                current_path: Some(path.clone()),
+                current_path: Some(user_visible_relative_path(relative)),
             });
             let staging = extent_ranges(&linux::fiemap_sync(&donor)?);
             refresh_report_map(root, &mut report, &staging, events)?;
