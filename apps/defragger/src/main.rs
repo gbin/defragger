@@ -1,7 +1,7 @@
 mod application_icon;
 mod controller;
 
-use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QString, QUrl};
+use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
 fn main() {
     #[cfg(feature = "development-service")]
@@ -14,7 +14,7 @@ fn main() {
     }
 
     let mut app = QGuiApplication::new();
-    QGuiApplication::set_desktop_file_name(&QString::from("net.gootz.defragger"));
+    application_icon::configure_desktop_identity();
     application_icon::set_application_icon();
     let mut engine = QQmlApplicationEngine::new();
     if let Some(engine) = engine.as_mut() {

@@ -484,7 +484,7 @@ Kirigami.ApplicationWindow {
         visible: false
         title: controller.plan_is_compact ? qsTr("Compaction plan preview") : qsTr("Defragmentation plan preview")
 
-        Shortcut { sequence: StandardKey.Cancel; onActivated: planWindow.close() }
+        Shortcut { sequences: [StandardKey.Cancel]; onActivated: planWindow.close() }
 
         ColumnLayout {
             anchors.fill: parent
