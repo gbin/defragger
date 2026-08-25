@@ -1,128 +1,80 @@
 # Defragger
 
-Defragger is a Plasma-first Linux filesystem analyzer and ext4/FAT defragmenter
-written in Rust with Qt Quick/Kirigami and command-line clients. It analyzes
-mounted or offline ext4, mounted FAT/exFAT, and unmounted classic FAT directly.
-Unmounted FAT16 and FAT32 volumes with VFAT long names can be defragmented or
-compacted; FAT12 and exFAT remain analysis-only.
+[![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://kernel.org/)
+![Status: Alpha](https://img.shields.io/badge/status-alpha-red.svg)
 
-It calls Linux filesystem ioctls directly. It does not execute `e4defrag`,
-`filefrag`, or any other filesystem utility.
+![Defragger showing a filesystem block map](docs/Screenshot.png)
 
-## Build
+Defragger is a Linux filesystem analyzer and defragmenter with a Qt
+Quick/Kirigami interface and a command-line client. It shows how files and free
+space are laid out on a volume, identifies fragmented files, and can reorganize
+supported filesystems without calling tools such as `e4defrag` or `filefrag`.
 
-Runtime/build dependencies on Arch Linux:
+## What it does
 
-```text
-cmake extra-cmake-modules kirigami polkit polkit-kde-agent
-qqc2-desktop-style qt6-base qt6-declarative rust
-```
+- Analyzes fragmentation and displays an adaptive filesystem block map.
+- Defragments ext4 files and offline FAT16/FAT32 volumes.
+- Compacts offline FAT16/FAT32 volumes by moving data toward the start of the
+  filesystem.
+- Uses PolicyKit for operations that need elevated access while keeping the GUI
+  and CLI unprivileged.
+- Supports safe cancellation and reports progress and final metrics.
 
-## Standalone development
+## Supported environment
 
-The default Cargo build starts the current GUI executable a second time as a
-transient root systemd service. systemd's PolicyKit action produces the normal
-desktop authentication dialog; no helper binary, D-Bus policy, service file,
-PolicyKit action, CMake build, installation, or daemon reload is needed:
+Defragger runs on Linux with Qt 6 and KDE Kirigami. KDE Plasma is the primary
+desktop target, but the project is not specific to Arch Linux. Privileged mode
+requires systemd, PolicyKit, and an active graphical PolicyKit agent.
+
+| Filesystem | Analysis | Defragmentation / compaction |
+| --- | --- | --- |
+| ext4 | Mounted or offline | Supported |
+| FAT16/FAT32 | Mounted or offline | Offline volumes only |
+| FAT12 | Mounted or offline | Analysis only |
+| exFAT | Mounted | Analysis only |
+
+The build requires Rust 1.85 or newer, CMake 3.24 or newer, Qt 6 Base and
+Declarative, Kirigami, a Qt Quick Controls desktop style, PolicyKit, and a C++
+toolchain. Package names vary by distribution.
+
+## Run from source
+
+The default development build uses a transient systemd helper and prompts for
+authorization through PolicyKit; it does not need to be installed first.
 
 ```sh
-cargo run -r
-# or, with just installed:
+cargo run --release
+# or
 just run
 ```
 
-The command-line client uses the same transient helper and authentication:
+Run without the privileged helper when systemd or PolicyKit is unavailable:
 
 ```sh
-cargo run -r -p defragger-cli -- list
-cargo run -r -p defragger-cli -- analyze /dev/nvme0n1p2
-cargo run -r -p defragger-cli -- defrag /dev/nvme0n1p2 --yes --require-fully-defragmented
-cargo run -r -p defragger-cli -- compact /dev/sdb1 --yes
+cargo run --release --no-default-features
 ```
 
-Shortcuts: `just list`, `just analyze DEVICE`, `just defrag DEVICE`, and
-`just compact DEVICE`. Device
-symlinks, mount points, and loop backing-image paths are also accepted.
-
-It streams stable textual progress, physical read/write ranges, and final
-metrics. Ctrl-C requests cancellation and waits for a safe extent-move
-boundary. Root-only fixture tests can bypass the helper with `--direct`.
-
-The transient process runs the same helper implementation as the installed
-service and talks to the GUI over a private D-Bus peer connection. If the GUI
-exits or crashes, that connection closes, the helper exits, and systemd
-collects the transient unit.
-
-This mode requires systemd and an active graphical PolicyKit agent. An explicit
-unprivileged fallback remains available for environments without them:
+The CLI accepts device paths, mount points, device symlinks, and loop-image
+paths:
 
 ```sh
-cargo run -r --no-default-features
-# or:
-just run-unprivileged
+cargo run --release -p defragger-cli -- list
+cargo run --release -p defragger-cli -- analyze /dev/nvme0n1p2
+cargo run --release -p defragger-cli -- defrag /dev/nvme0n1p2 --yes
+cargo run --release -p defragger-cli -- compact /dev/sdb1 --yes
 ```
 
-The fallback runs the service in the GUI process with the permissions of your
-shell user. Protected files are skipped, and FAT/exFAT FIBMAP may be unavailable
-without `CAP_SYS_RAWIO`.
-
-## Installed privileged mode
-
-The production split-service build is explicit. CMake enables the
-`system-helper` Cargo feature for the GUI and builds the separate helper:
+## System-wide installation
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build
 sudo cmake --install build
 sudo systemctl daemon-reload
 ```
 
-The equivalent shortcuts are:
-
-```sh
-just system-build
-just system-install
-```
-
-Once the helper is installed, the helper-backed GUI can also be run directly
-from Cargo while developing:
-
-```sh
-cargo run --release --package defragger --no-default-features --features system-helper
-```
-
-The system-wide install includes a root-owned D-Bus helper and separate
-PolicyKit actions for analysis and modification. The desktop PolicyKit agent
-owns the authentication UI; the Qt/Kirigami GUI and CLI remain unprivileged. A
-per-user installation cannot install or activate this helper.
-
-Force Wayland in either mode with:
-
-```sh
-QT_QPA_PLATFORM=wayland cargo run --release --package defragger
-```
-
-The analyzer does not follow symbolic links or cross mount boundaries. The
-installed helper can read protected files after PolicyKit authorization.
-Mounted FAT/exFAT file fragmentation uses FIEMAP where available and Linux's
-capability-gated FIBMAP fallback otherwise. Unmounted classic FAT is parsed
-directly, including its allocation tables and directory tree. The helper uses a bounded
-capability set for protected-file inspection, private mounts, and ext4 extent
-moves. Clean offline ext4 volumes are analyzed through a read-only private
-mount. If an offline volume needs journal recovery, the helper requests the
-stronger modification authorization and replays it in a private read-write
-mount before analysis. A volume whose ext4 superblock is marked erroneous is
-rejected until it has been checked offline with `e2fsck`; allocation-map
-checksum failures also stop defragmentation immediately. Because Linux does not expose a
-filesystem-wide allocation map for mounted FAT/exFAT, that fallback map leaves
-free space and filesystem metadata explicitly unknown.
-
-The adaptive block map updates while analysis proceeds. A 4,096-bin backend
-map is combined into as many fixed 9-pixel tiles as the available area can
-hold, and is reevaluated when the window changes size. Tiles use one priority
-color: red fragmented data, gray unscanned allocation, white explicitly free,
-green contiguous data, or a typed metadata color. Partial occupancy produces
-a lighter shade, and hovering shows the exact composition and physical range.
-See [the architecture notes](docs/architecture.md) for the D-Bus/PolicyKit and
-write boundaries.
+This installs the application, CLI, root-owned D-Bus helper, systemd service,
+and PolicyKit actions. See the [architecture notes](docs/architecture.md) for
+the privilege boundaries and implementation details.
