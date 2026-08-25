@@ -9,7 +9,7 @@
 
 ![Defragger reorganizing a generated test volume](docs/defragger.gif)
 
-After moving to Linux, I discovered that the Windows utility I missed most was
+After moving to Linux, 20+ years ago ... I discovered that the Windows utility I missed most was
 the graphical disk defragmenter.
 
 Not because modern Linux filesystems need a weekly defrag ritual. The old block
