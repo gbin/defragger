@@ -16,7 +16,7 @@ Not because modern Linux filesystems need a weekly defrag ritual. The old block
 map was one of those accidental interfaces that made the machine legible: you
 could actually watch the filesystem reorganize itself.
 
-Then I needed a reproducible storage layout while testing a high-throughput
+Then recently I needed a reproducible storage layout while testing a high-throughput
 logger. Fragmentation and extent allocation were adding measurable variance,
 even on NVMe, so the nostalgia project became a real filesystem tool.
 
