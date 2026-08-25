@@ -1,16 +1,67 @@
 # Defragger
 
+**A real graphical defragmenter for Linux. Usually unnecessary. Occasionally
+useful. Weirdly satisfying.**
+
+![Defragger reorganizing a generated test volume](docs/defragger.gif)
+
+After moving to Linux, I discovered that the Windows utility I missed most was
+the graphical disk defragmenter.
+
+Not because modern Linux filesystems need a weekly defrag ritual. The old block
+map was one of those accidental interfaces that made the machine legible: you
+could actually watch the filesystem reorganize itself.
+
+Then I needed a reproducible storage layout while testing a high-throughput
+logger. Fragmentation and extent allocation were adding measurable variance,
+even on NVMe, so the nostalgia project became a real filesystem tool.
+
+Defragger shows how files, free space, and filesystem metadata are allocated,
+finds fragmented files, and can reorganize supported filesystems without
+shelling out to `e4defrag` or `filefrag`.
+
 [![License: MIT or Apache 2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://kernel.org/)
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-red.svg)
 
-![Defragger showing a filesystem block map](docs/Screenshot.png)
+> [!WARNING]
+> This is alpha filesystem software. Back up important data. The ext4 path has
+> received the most testing. FAT write support is newer and should first be
+> used with disposable or fully backed-up volumes.
 
-Defragger is a Linux filesystem analyzer and defragmenter with a Qt
-Quick/Kirigami interface and a command-line client. It shows how files and free
-space are laid out on a volume, identifies fragmented files, and can reorganize
-supported filesystems without calling tools such as `e4defrag` or `filefrag`.
+## Try it safely
+
+```sh
+just demo
+```
+
+This decompresses the repository's deliberately fragmented ext4 fixture,
+attaches the copy as a temporary loop device, and opens Defragger. Select the
+loop device printed in the terminal. Closing Defragger detaches and deletes the
+temporary image; the demo does not write to your real volumes.
+
+The demo needs `just`, `zstd`, loop-device support, and `sudo` for attaching the
+temporary image. The application itself remains unprivileged.
+
+## How it works
+
+Defragger is not a wrapper around existing command-line tools.
+
+For ext4, it obtains filesystem allocation maps through `FS_IOC_GETFSMAP`, maps
+individual files through `FS_IOC_FIEMAP`, and moves extents using the kernel's
+`EXT4_IOC_MOVE_EXT` interface.
+
+The graphical application and CLI never run as root. Privileged operations are
+performed by a narrow PolicyKit-authorized helper over D-Bus. The helper accepts
+validated, opaque operation IDs rather than arbitrary paths or commands.
+
+Classic FAT writing is offline only. Defragger validates both FAT copies and
+file chains, reads copied data back before redirecting directory metadata, and
+updates mirrored allocation tables conservatively.
+
+See the [architecture notes](docs/architecture.md) for the complete privilege
+boundary, validation rules, and update ordering.
 
 ## What it does
 
