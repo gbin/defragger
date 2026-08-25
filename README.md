@@ -1,7 +1,11 @@
 # Defragger
 
-**A real graphical defragmenter for Linux. Usually unnecessary. Occasionally
-useful. Weirdly satisfying.**
+[![License: MIT or Apache 2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
+[![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://kernel.org/)
+![Status: Alpha](https://img.shields.io/badge/status-alpha-red.svg)
+
+**A real graphical defragmenter for Linux. Occasionally useful but weirdly satisfying.**
 
 ![Defragger reorganizing a generated test volume](docs/defragger.gif)
 
@@ -20,10 +24,6 @@ Defragger shows how files, free space, and filesystem metadata are allocated,
 finds fragmented files, and can reorganize supported filesystems without
 shelling out to `e4defrag` or `filefrag`.
 
-[![License: MIT or Apache 2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
-[![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
-[![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://kernel.org/)
-![Status: Alpha](https://img.shields.io/badge/status-alpha-red.svg)
 
 > [!WARNING]
 > This is alpha filesystem software. Back up important data. The ext4 path has
