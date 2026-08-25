@@ -80,11 +80,14 @@ analysis uses a clean, read-only `noload` mount; if journal recovery is needed,
 the helper requests modification authorization and privately mounts read-write
 to replay the journal before analysis. Ext4's on-disk error flag blocks every
 writable mount, and an `EBADMSG` allocation-map result is treated as filesystem
-corruption rather than a recoverable visualization failure. After each committed chunk,
-the donor's exchanged source blocks are released and FIEMAP/GETFSMAP are rerun
-before events are published. Cancellation is observed before a move or after
-this cleanup boundary. There is no shell command, `e4defrag`, or root GUI
-fallback.
+corruption rather than a recoverable visualization failure. The complete donor
+layout is published before a file move. Chunk data is range-synced and released
+from the page cache, while the donor retains exchanged source extents until it
+is closed once at the file boundary. FIEMAP/GETFSMAP and the UI map are then
+refreshed once instead of after every chunk. A partially improved file may be
+retried once with a donor allocated from the filesystem root. Cancellation is
+observed before a move or after a range-sync boundary. There is no shell
+command, `e4defrag`, or root GUI fallback.
 
 The FAT16/FAT32 writer only accepts an unmounted, clean, mirrored classic FAT
 snapshot. It reparses and compares the boot sector, allocation tables, file

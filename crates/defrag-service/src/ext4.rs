@@ -31,6 +31,7 @@ use crate::{
 };
 
 const MOVE_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_DEFRAG_PASSES: u64 = 2;
 
 pub struct Ext4Backend;
 
@@ -474,7 +475,7 @@ impl FilesystemAnalysis for Ext4Analysis {
             })
             .map(|file| PlanCandidate {
                 path: file.path.clone(),
-                rewrite_bytes: file.allocated_bytes,
+                rewrite_bytes: file.allocated_bytes.saturating_mul(MAX_DEFRAG_PASSES),
                 current_runs: file.physical_runs,
                 target_runs: file.minimum_runs.max(1),
                 role: PlanCandidateRole::FragmentationTarget,
@@ -492,6 +493,8 @@ impl FilesystemAnalysis for Ext4Analysis {
         let excluded_files = self.report.files.len() as u64 - candidates.len() as u64;
         let mut warnings = vec![
             "Every candidate is reopened and revalidated immediately before moving extents."
+                .to_owned(),
+            "A file that improves but remains fragmented may receive one additional donor-allocation pass."
                 .to_owned(),
         ];
         if self.report.completeness == AnalysisCompleteness::Partial {
@@ -609,80 +612,109 @@ fn execute_plan(
             bytes_total,
             current_path: Some(user_visible_relative_path(relative)),
         });
-        let target = OpenOptions::new().read(true).write(true).open(&path)?;
-        let metadata = target.metadata()?;
-        if !metadata.is_file() {
-            files_completed = files_completed.saturating_add(1);
-            continue;
-        }
-        let before_extents = linux::fiemap_sync(&target)?;
-        let before = inspect_file(path.clone(), &metadata, &target, &before_extents);
-        if !before.eligible_for_plan || before.excess_runs == 0 {
-            files_completed = files_completed.saturating_add(1);
-            continue;
-        }
-        let block_size = linux::filesystem_block_size(&target)?;
-        let allocation_bytes = metadata
-            .len()
-            .div_ceil(block_size)
-            .saturating_mul(block_size);
-        let donor = create_donor(path.parent().unwrap_or(root))?;
-        events.defrag_progress(DefragProgress {
-            job_id,
-            phase: DefragPhase::AllocatingDonor,
-            files_completed,
-            files_total,
-            bytes_moved,
-            bytes_total,
-            current_path: Some(user_visible_relative_path(relative)),
-        });
-        allocate_file(&donor, allocation_bytes)?;
-        donor.sync_data()?;
-        let donor_extents = linux::fiemap_sync(&donor)?;
-        if donor_extents.is_empty() || count_runs(&donor_extents) >= before.physical_runs {
-            files_completed = files_completed.saturating_add(1);
-            continue;
-        }
-
-        refresh_report_map(root, &mut report, &extent_ranges(&donor_extents), events)?;
-        let total_blocks = allocation_bytes / block_size;
-        let chunk_blocks = (MOVE_CHUNK_BYTES / block_size).max(1);
-        let mut logical_block = 0u64;
-        while logical_block < total_blocks {
+        let mut pass = 0u64;
+        loop {
             control.checkpoint()?;
-            let requested_blocks = chunk_blocks.min(total_blocks - logical_block);
-            let logical_bytes = logical_block.saturating_mul(block_size);
-            let requested_bytes = requested_blocks.saturating_mul(block_size);
-            let current_extents = linux::fiemap_sync(&target)?;
-            let reading = physical_for_logical(&current_extents, logical_bytes, requested_bytes);
-            let writing = physical_for_logical(&donor_extents, logical_bytes, requested_bytes);
-            events.defrag_pending_io(reading, writing);
+            let target = OpenOptions::new().read(true).write(true).open(&path)?;
+            let metadata = target.metadata()?;
+            if !metadata.is_file() {
+                break;
+            }
+            let before_extents = linux::fiemap_sync(&target)?;
+            let before = inspect_file(path.clone(), &metadata, &target, &before_extents);
+            if !before.eligible_for_plan || before.excess_runs == 0 {
+                break;
+            }
+            let block_size = linux::filesystem_block_size(&target)?;
+            let allocation_bytes = metadata
+                .len()
+                .div_ceil(block_size)
+                .saturating_mul(block_size);
+            let preferred_directory = if pass == 0 {
+                path.parent().unwrap_or(root)
+            } else {
+                root
+            };
+            let donor = create_donor(preferred_directory)?;
             events.defrag_progress(DefragProgress {
                 job_id,
-                phase: DefragPhase::MovingExtents,
+                phase: DefragPhase::AllocatingDonor,
                 files_completed,
                 files_total,
                 bytes_moved,
                 bytes_total,
                 current_path: Some(user_visible_relative_path(relative)),
             });
-
-            let moved_blocks =
-                linux::move_extents(&target, &donor, logical_block, requested_blocks)?;
-            if moved_blocks == 0 {
-                return Err(ServiceError::Io(io::Error::other(
-                    "EXT4_IOC_MOVE_EXT completed without moving any blocks",
-                )));
+            allocate_file(&donor, allocation_bytes)?;
+            let donor_extents = linux::fiemap_sync(&donor)?;
+            if donor_extents.is_empty() || count_runs(&donor_extents) >= before.physical_runs {
+                break;
             }
-            target.sync_data()?;
-            let moved_bytes = moved_blocks.saturating_mul(block_size);
-            punch_hole(&donor, logical_bytes, moved_bytes)?;
-            donor.sync_data()?;
 
-            logical_block = logical_block.saturating_add(moved_blocks);
-            bytes_moved = bytes_moved.saturating_add(moved_bytes);
+            // Publish the complete operation once. Chunk-level updates below
+            // carry progress only, avoiding a full GETFSMAP rebuild and a
+            // pending-I/O repaint after every 16 MiB.
+            events.defrag_pending_io(
+                extent_ranges(&before_extents),
+                extent_ranges(&donor_extents),
+            );
+            refresh_report_map(root, &mut report, &extent_ranges(&donor_extents), events)?;
+            let total_blocks = allocation_bytes / block_size;
+            let chunk_blocks = (MOVE_CHUNK_BYTES / block_size).max(1);
+            let mut logical_block = 0u64;
+            while logical_block < total_blocks {
+                control.checkpoint()?;
+                let requested_blocks = chunk_blocks.min(total_blocks - logical_block);
+                let logical_bytes = logical_block.saturating_mul(block_size);
+                events.defrag_progress(DefragProgress {
+                    job_id,
+                    phase: DefragPhase::MovingExtents,
+                    files_completed,
+                    files_total,
+                    bytes_moved,
+                    bytes_total,
+                    current_path: Some(user_visible_relative_path(relative)),
+                });
+
+                let moved_blocks =
+                    linux::move_extents(&target, &donor, logical_block, requested_blocks)?;
+                if moved_blocks == 0 {
+                    return Err(ServiceError::Io(io::Error::other(
+                        "EXT4_IOC_MOVE_EXT completed without moving any blocks",
+                    )));
+                }
+                let moved_bytes = moved_blocks.saturating_mul(block_size);
+                sync_and_release_cache(&target, logical_bytes, moved_bytes)?;
+                logical_block = logical_block.saturating_add(moved_blocks);
+                bytes_moved = bytes_moved.saturating_add(moved_bytes);
+
+                if control.is_cancelled() {
+                    target.sync_data()?;
+                    events.defrag_pending_io(Vec::new(), Vec::new());
+                    drop(donor);
+                    let fresh_extents = linux::fiemap_sync(&target)?;
+                    let fresh =
+                        inspect_file(path.clone(), &target.metadata()?, &target, &fresh_extents);
+                    replace_file_report(&mut report, fresh);
+                    recompute_fragmentation(&mut report);
+                    refresh_report_map(root, &mut report, &[], events)?;
+                    normalize_finished_report(plan, root, &mut report);
+                    return Ok(PlanExecution {
+                        report,
+                        stopped: true,
+                    });
+                }
+            }
+
+            target.sync_data()?;
+            events.defrag_pending_io(Vec::new(), Vec::new());
+            // Closing the unlinked donor releases all exchanged source
+            // extents in one operation, matching e4defrag's lifecycle.
+            drop(donor);
             let fresh_extents = linux::fiemap_sync(&target)?;
             let fresh = inspect_file(path.clone(), &target.metadata()?, &target, &fresh_extents);
+            let improved = fresh.physical_runs < before.physical_runs;
+            let finished = fresh.excess_runs == 0;
             replace_file_report(&mut report, fresh.clone());
             recompute_fragmentation(&mut report);
             events.defrag_progress(DefragProgress {
@@ -694,20 +726,13 @@ fn execute_plan(
                 bytes_total,
                 current_path: Some(user_visible_relative_path(relative)),
             });
-            let staging = extent_ranges(&linux::fiemap_sync(&donor)?);
-            refresh_report_map(root, &mut report, &staging, events)?;
+            refresh_report_map(root, &mut report, &[], events)?;
             events.defrag_file_updated(fresh, report.fragmentation.clone(), bytes_moved);
-            events.defrag_pending_io(Vec::new(), Vec::new());
-            if control.is_cancelled() {
-                drop(donor);
-                refresh_report_map(root, &mut report, &[], events)?;
-                normalize_finished_report(plan, root, &mut report);
-                return Ok(PlanExecution {
-                    report,
-                    stopped: true,
-                });
+
+            pass = pass.saturating_add(1);
+            if finished || !improved || pass >= MAX_DEFRAG_PASSES {
+                break;
             }
-            control.checkpoint()?;
         }
         files_completed = files_completed.saturating_add(1);
     }
@@ -779,42 +804,27 @@ fn allocate_file(file: &File, length: u64) -> io::Result<()> {
     }
 }
 
-fn punch_hole(file: &File, offset: u64, length: u64) -> io::Result<()> {
+fn sync_and_release_cache(file: &File, offset: u64, length: u64) -> io::Result<()> {
     let offset = i64::try_from(offset)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "hole offset is too large"))?;
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "sync offset is too large"))?;
     let length = i64::try_from(length)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "hole length is too large"))?;
-    // SAFETY: fd is valid and fallocate does not access userspace pointers.
-    if unsafe {
-        libc::fallocate(
-            file.as_raw_fd(),
-            libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
-            offset,
-            length,
-        )
-    } < 0
-    {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "sync length is too large"))?;
+    let flags = libc::SYNC_FILE_RANGE_WAIT_BEFORE
+        | libc::SYNC_FILE_RANGE_WRITE
+        | libc::SYNC_FILE_RANGE_WAIT_AFTER;
+    // SAFETY: fd is valid and the call does not access userspace pointers.
+    if unsafe { libc::sync_file_range(file.as_raw_fd(), offset, length, flags) } < 0 {
+        return Err(io::Error::last_os_error());
     }
-}
-
-fn physical_for_logical(extents: &[FileExtent], logical: u64, length: u64) -> Vec<PhysicalRange> {
-    let end = logical.saturating_add(length);
-    extents
-        .iter()
-        .filter_map(|extent| {
-            let overlap_start = logical.max(extent.logical);
-            let overlap_end = end.min(extent.logical.saturating_add(extent.length));
-            (overlap_end > overlap_start).then_some(PhysicalRange {
-                offset_bytes: extent
-                    .physical
-                    .saturating_add(overlap_start.saturating_sub(extent.logical)),
-                length_bytes: overlap_end.saturating_sub(overlap_start),
-            })
-        })
-        .collect()
+    // POSIX_FADV_DONTNEED is advisory and returns an errno value directly.
+    // It prevents a large defrag pass from retaining every moved page in RAM.
+    let result =
+        unsafe { libc::posix_fadvise(file.as_raw_fd(), offset, length, libc::POSIX_FADV_DONTNEED) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(result))
+    }
 }
 
 fn extent_ranges(extents: &[FileExtent]) -> Vec<PhysicalRange> {
