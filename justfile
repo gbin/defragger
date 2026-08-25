@@ -8,6 +8,10 @@ run:
 run-unprivileged:
     cargo run -r --no-default-features
 
+# Open the GUI with a disposable copy of the committed fragmented ext4 fixture.
+demo:
+    scripts/demo.sh
+
 # Command-line client using the same transient development helper.
 list:
     cargo run -r -p defragger-cli -- list
