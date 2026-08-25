@@ -22,6 +22,7 @@ mod qobject {
         #[qproperty(QString, active_operation)]
         #[qproperty(i32, volume_count)]
         #[qproperty(i32, volume_revision)]
+        #[qproperty(i32, job_revision)]
         #[qproperty(i32, map_revision)]
         #[qproperty(i32, analysis_revision)]
         #[qproperty(i32, display_map_generation)]
@@ -37,6 +38,7 @@ mod qobject {
         #[qproperty(bool, plan_available)]
         #[qproperty(QString, plan_message)]
         #[qproperty(bool, busy)]
+        #[qproperty(bool, any_busy)]
         #[qproperty(bool, paused)]
         #[qproperty(bool, has_report)]
         #[qproperty(f64, files_scanned)]
@@ -93,6 +95,8 @@ mod qobject {
         fn volume_has_report(self: &Controller, index: i32) -> bool;
         #[qinvokable]
         fn volume_fragmented_basis_points(self: &Controller, index: i32) -> i32;
+        #[qinvokable]
+        fn volume_active_operation(self: &Controller, index: i32) -> QString;
         #[qinvokable]
         fn file_path(self: &Controller, index: i32) -> QString;
         #[qinvokable]
@@ -261,6 +265,52 @@ struct CachedAnalysis {
     map_file_ranges: Arc<Vec<MapFileRange>>,
 }
 
+#[derive(Clone)]
+struct VolumeJobState {
+    operation: String,
+    worker: Option<Sender<WorkerCommand>>,
+    paused: bool,
+    map_bins: Vec<MapBin>,
+    files_scanned: f64,
+    bytes_scanned: f64,
+    status: String,
+    activity_reading: Vec<PhysicalRange>,
+    activity_writing: Vec<PhysicalRange>,
+    files_completed: f64,
+    files_total: f64,
+    bytes_moved: f64,
+    bytes_total: f64,
+}
+
+impl VolumeJobState {
+    fn new(operation: &str, worker: Option<Sender<WorkerCommand>>, map_bins: Vec<MapBin>) -> Self {
+        Self {
+            operation: operation.to_owned(),
+            worker,
+            paused: false,
+            map_bins,
+            files_scanned: 0.0,
+            bytes_scanned: 0.0,
+            status: String::new(),
+            activity_reading: Vec::new(),
+            activity_writing: Vec::new(),
+            files_completed: 0.0,
+            files_total: 0.0,
+            bytes_moved: 0.0,
+            bytes_total: 0.0,
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self.operation.as_str() {
+            "defragmentation" => "Defragmentation",
+            "compaction" => "Compaction",
+            "unmount" => "Unmount",
+            _ => "Analysis",
+        }
+    }
+}
+
 pub struct ControllerRust {
     display_map_data: QByteArray,
     activity_data: QByteArray,
@@ -271,6 +321,7 @@ pub struct ControllerRust {
     active_operation: QString,
     volume_count: i32,
     volume_revision: i32,
+    job_revision: i32,
     map_revision: i32,
     analysis_revision: i32,
     display_map_generation: i32,
@@ -286,6 +337,7 @@ pub struct ControllerRust {
     plan_available: bool,
     plan_message: QString,
     busy: bool,
+    any_busy: bool,
     paused: bool,
     has_report: bool,
     files_scanned: f64,
@@ -297,15 +349,13 @@ pub struct ControllerRust {
     defrag_bytes_total: f64,
     plan_estimated_rewrite_bytes: f64,
     client: Option<AppClient>,
-    worker: Option<Sender<WorkerCommand>>,
     analysis_id: Option<AnalysisId>,
     plan_id: Option<PlanId>,
     visible_volume_id: Option<VolumeId>,
-    active_volume_id: Option<VolumeId>,
-    active_map_bins: Vec<MapBin>,
-    active_files_scanned: f64,
-    active_bytes_scanned: f64,
-    active_status: String,
+    // Authoritative live state is keyed by drive. The Qt properties above are
+    // only the projection for `visible_volume_id`.
+    jobs: HashMap<VolumeId, VolumeJobState>,
+    volume_statuses: HashMap<VolumeId, String>,
     analyses: HashMap<VolumeId, CachedAnalysis>,
     volumes: Vec<Volume>,
     map_bins: Vec<MapBin>,
@@ -327,6 +377,7 @@ impl Default for ControllerRust {
             active_operation: QString::default(),
             volume_count: 0,
             volume_revision: 0,
+            job_revision: 0,
             map_revision: 0,
             analysis_revision: 0,
             display_map_generation: 0,
@@ -342,6 +393,7 @@ impl Default for ControllerRust {
             plan_available: false,
             plan_message: QString::default(),
             busy: false,
+            any_busy: false,
             paused: false,
             has_report: false,
             files_scanned: 0.0,
@@ -353,15 +405,11 @@ impl Default for ControllerRust {
             defrag_bytes_total: 0.0,
             plan_estimated_rewrite_bytes: 0.0,
             client: None,
-            worker: None,
             analysis_id: None,
             plan_id: None,
             visible_volume_id: None,
-            active_volume_id: None,
-            active_map_bins: Vec::new(),
-            active_files_scanned: 0.0,
-            active_bytes_scanned: 0.0,
-            active_status: String::new(),
+            jobs: HashMap::new(),
+            volume_statuses: HashMap::new(),
             analyses: HashMap::new(),
             volumes: Vec::new(),
             map_bins: Vec::new(),
@@ -369,6 +417,58 @@ impl Default for ControllerRust {
             map_files: Vec::new(),
             map_file_ranges: Arc::default(),
             plan_candidates: Vec::new(),
+        }
+    }
+}
+
+impl ControllerRust {
+    fn merge_job_map(
+        &mut self,
+        volume_id: VolumeId,
+        full: bool,
+        bins: Vec<MapBin>,
+    ) -> Option<Vec<MapBin>> {
+        self.jobs.get_mut(&volume_id).map(|job| {
+            merge_map_bins(&mut job.map_bins, full, bins);
+            job.map_bins.clone()
+        })
+    }
+
+    fn update_job_progress(&mut self, volume_id: VolumeId, files: u64, bytes: u64, detail: &str) {
+        if let Some(job) = self.jobs.get_mut(&volume_id) {
+            job.files_scanned = files as f64;
+            job.bytes_scanned = bytes as f64;
+            job.status = detail.to_owned();
+        }
+    }
+
+    fn update_job_optimization_progress(
+        &mut self,
+        volume_id: VolumeId,
+        files_completed: u64,
+        files_total: u64,
+        bytes_moved: u64,
+        bytes_total: u64,
+        detail: &str,
+    ) {
+        if let Some(job) = self.jobs.get_mut(&volume_id) {
+            job.files_completed = files_completed as f64;
+            job.files_total = files_total as f64;
+            job.bytes_moved = bytes_moved as f64;
+            job.bytes_total = bytes_total as f64;
+            job.status = detail.to_owned();
+        }
+    }
+
+    fn update_job_activity(
+        &mut self,
+        volume_id: VolumeId,
+        reading: &[PhysicalRange],
+        writing: &[PhysicalRange],
+    ) {
+        if let Some(job) = self.jobs.get_mut(&volume_id) {
+            job.activity_reading = reading.to_vec();
+            job.activity_writing = writing.to_vec();
         }
     }
 }
@@ -424,11 +524,27 @@ impl qobject::Controller {
                         })
                     });
                 self.as_mut().rust_mut().volumes = volumes;
+                let known_volume_ids = self
+                    .volumes
+                    .iter()
+                    .map(|volume| volume.id)
+                    .collect::<Vec<_>>();
+                self.as_mut()
+                    .rust_mut()
+                    .volume_statuses
+                    .retain(|volume_id, _| known_volume_ids.contains(volume_id));
                 self.as_mut().rust_mut().client = Some(client);
                 self.as_mut().set_volume_count(count);
                 let revision = self.volume_revision.wrapping_add(1).max(1);
                 self.as_mut().set_volume_revision(revision);
-                self.as_mut().set_status(QString::default());
+                let visible_volume_id = self
+                    .visible_volume_id
+                    .filter(|volume_id| known_volume_ids.contains(volume_id));
+                if let Some(volume_id) = visible_volume_id {
+                    self.as_mut().display_volume(volume_id);
+                } else {
+                    self.as_mut().set_status(QString::default());
+                }
             }
             Err(error) => self
                 .as_mut()
@@ -437,7 +553,7 @@ impl qobject::Controller {
     }
 
     fn analyze(mut self: Pin<&mut Self>, volume_id: &QString) {
-        if self.busy {
+        if self.any_busy {
             return;
         }
         let Ok(volume_id) = volume_id.to_string().parse::<u64>() else {
@@ -454,18 +570,11 @@ impl qobject::Controller {
 
         let volume_id = VolumeId(volume_id);
         let (command_sender, command_receiver) = mpsc::channel();
-        self.as_mut().rust_mut().worker = Some(command_sender);
-        self.as_mut().rust_mut().active_volume_id = Some(volume_id);
-        self.as_mut().rust_mut().active_map_bins.clear();
-        self.as_mut().rust_mut().active_files_scanned = 0.0;
-        self.as_mut().rust_mut().active_bytes_scanned = 0.0;
-        self.as_mut().rust_mut().active_status = starting_status().to_owned();
-        self.as_mut()
-            .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
-        self.as_mut()
-            .set_active_operation(QString::from("analysis"));
-        self.as_mut().set_paused(false);
-        self.as_mut().set_busy(true);
+        let mut job = VolumeJobState::new("analysis", Some(command_sender), Vec::new());
+        job.status = starting_status().to_owned();
+        self.as_mut().rust_mut().volume_statuses.remove(&volume_id);
+        self.as_mut().rust_mut().jobs.insert(volume_id, job);
+        self.as_mut().job_registry_changed();
         self.as_mut().display_volume(volume_id);
 
         let qt_thread = self.qt_thread();
@@ -474,10 +583,13 @@ impl qobject::Controller {
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = qt_thread.queue(move |controller| {
-                        controller.apply_update(UiUpdate::Failed {
-                            operation: JobOperation::Analysis,
-                            message: error.to_string(),
-                        })
+                        controller.apply_update(
+                            volume_id,
+                            UiUpdate::Failed {
+                                operation: JobOperation::Analysis,
+                                message: error.to_string(),
+                            },
+                        )
                     });
                     return;
                 }
@@ -535,7 +647,7 @@ impl qobject::Controller {
                         UiUpdate::Finished { .. } | UiUpdate::Cancelled | UiUpdate::Failed { .. }
                     );
                     if qt_thread
-                        .queue(move |controller| controller.apply_update(update))
+                        .queue(move |controller| controller.apply_update(volume_id, update))
                         .is_err()
                     {
                         handle.cancel();
@@ -550,7 +662,7 @@ impl qobject::Controller {
     }
 
     fn unmount_and_analyze(mut self: Pin<&mut Self>, volume_id: &QString) {
-        if self.busy {
+        if self.any_busy {
             return;
         }
         let Ok(volume_id) = volume_id.to_string().parse::<u64>() else {
@@ -582,31 +694,37 @@ impl qobject::Controller {
             return;
         };
 
-        self.as_mut().set_busy(true);
-        self.as_mut().set_active_operation(QString::from("unmount"));
-        self.as_mut()
-            .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
-        self.as_mut()
-            .set_status(QString::from(&format!("Unmounting {source}…")));
+        let mut job = VolumeJobState::new("unmount", None, Vec::new());
+        job.status = format!("Unmounting {source}…");
+        self.as_mut().rust_mut().volume_statuses.remove(&volume_id);
+        self.as_mut().rust_mut().jobs.insert(volume_id, job);
+        self.as_mut().job_registry_changed();
+        self.as_mut().display_volume(volume_id);
 
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
             let result = client.unmount_volume(volume_id);
             let _ = qt_thread.queue(move |mut controller| {
-                controller.as_mut().set_busy(false);
-                controller.as_mut().set_active_operation(QString::default());
-                controller
-                    .as_mut()
-                    .set_analyzing_volume_id(QString::default());
+                controller.as_mut().rust_mut().jobs.remove(&volume_id);
+                controller.as_mut().job_registry_changed();
                 match result {
                     Ok(()) => {
                         controller.as_mut().refresh();
                         let volume_id = QString::from(&volume_id.0.to_string());
                         controller.as_mut().analyze(&volume_id);
                     }
-                    Err(error) => controller.as_mut().set_status(QString::from(&format!(
-                        "Could not unmount {source}: {error}"
-                    ))),
+                    Err(error) => {
+                        let message = format!("Could not unmount {source}: {error}");
+                        controller
+                            .as_mut()
+                            .rust_mut()
+                            .volume_statuses
+                            .insert(volume_id, message.clone());
+                        if controller.visible_volume_id == Some(volume_id) {
+                            controller.as_mut().display_volume(volume_id);
+                            controller.as_mut().set_status(QString::from(&message));
+                        }
+                    }
                 }
             });
         });
@@ -622,37 +740,46 @@ impl qobject::Controller {
     }
 
     fn pause(mut self: Pin<&mut Self>) {
-        if let Some(worker) = &self.worker {
+        let Some(volume_id) = self.visible_volume_id else {
+            return;
+        };
+        if let Some(job) = self.as_mut().rust_mut().jobs.get_mut(&volume_id)
+            && let Some(worker) = &job.worker
+        {
             let _ = worker.send(WorkerCommand::Pause);
-            let status = format!("{} paused", self.operation_title());
-            self.as_mut().rust_mut().active_status = status.clone();
-            self.as_mut().set_paused(true);
-            if self.active_is_visible() {
-                self.as_mut().set_status(QString::from(&status));
-            }
+            job.paused = true;
+            job.status = format!("{} paused", job.title());
+            self.as_mut().job_registry_changed();
+            self.as_mut().display_volume(volume_id);
         }
     }
 
     fn resume(mut self: Pin<&mut Self>) {
-        if let Some(worker) = &self.worker {
+        let Some(volume_id) = self.visible_volume_id else {
+            return;
+        };
+        if let Some(job) = self.as_mut().rust_mut().jobs.get_mut(&volume_id)
+            && let Some(worker) = &job.worker
+        {
             let _ = worker.send(WorkerCommand::Resume);
-            let status = format!("{} resumed", self.operation_title());
-            self.as_mut().rust_mut().active_status = status.clone();
-            self.as_mut().set_paused(false);
-            if self.active_is_visible() {
-                self.as_mut().set_status(QString::from(&status));
-            }
+            job.paused = false;
+            job.status = format!("{} resumed", job.title());
+            self.as_mut().job_registry_changed();
+            self.as_mut().display_volume(volume_id);
         }
     }
 
     fn stop(mut self: Pin<&mut Self>) {
-        if let Some(worker) = &self.worker {
+        let Some(volume_id) = self.visible_volume_id else {
+            return;
+        };
+        if let Some(job) = self.as_mut().rust_mut().jobs.get_mut(&volume_id)
+            && let Some(worker) = &job.worker
+        {
             let _ = worker.send(WorkerCommand::Cancel);
-            let status = format!("Stopping {}…", self.operation_title().to_lowercase());
-            self.as_mut().rust_mut().active_status = status.clone();
-            if self.active_is_visible() {
-                self.as_mut().set_status(QString::from(&status));
-            }
+            job.status = format!("Stopping {}…", job.title().to_lowercase());
+            self.as_mut().job_registry_changed();
+            self.as_mut().display_volume(volume_id);
         }
     }
 
@@ -667,6 +794,9 @@ impl qobject::Controller {
     }
 
     fn build_optimization_plan(mut self: Pin<&mut Self>, mode: defrag_domain::OptimizationMode) {
+        if self.any_busy {
+            return;
+        }
         let Some(analysis_id) = self.analysis_id else {
             self.as_mut()
                 .set_status(QString::from("Analyze the selected volume first"));
@@ -728,7 +858,7 @@ impl qobject::Controller {
     }
 
     fn start_defrag(mut self: Pin<&mut Self>) {
-        if self.busy {
+        if self.any_busy {
             return;
         }
         let Some(plan_id) = self.as_mut().rust_mut().plan_id.take() else {
@@ -752,20 +882,14 @@ impl qobject::Controller {
             "defragmentation"
         };
         let (command_sender, command_receiver) = mpsc::channel();
-        self.as_mut().rust_mut().worker = Some(command_sender);
-        self.as_mut().rust_mut().active_volume_id = Some(volume_id);
-        self.as_mut().rust_mut().active_map_bins = self.map_bins.clone();
-        self.as_mut().set_busy(true);
-        self.as_mut().set_paused(false);
-        self.as_mut().set_defrag_files_completed(0.0);
-        self.as_mut().set_defrag_files_total(files_total);
-        self.as_mut().set_defrag_bytes_moved(0.0);
-        self.as_mut().set_defrag_bytes_total(bytes_total);
-        self.as_mut()
-            .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
-        self.as_mut().set_active_operation(QString::from(operation));
-        self.as_mut()
-            .set_status(QString::from("Starting defragmentation…"));
+        let mut job = VolumeJobState::new(operation, Some(command_sender), self.map_bins.clone());
+        job.status = format!("Starting {}…", job.title().to_lowercase());
+        job.files_total = files_total;
+        job.bytes_total = bytes_total;
+        self.as_mut().rust_mut().volume_statuses.remove(&volume_id);
+        self.as_mut().rust_mut().jobs.insert(volume_id, job);
+        self.as_mut().job_registry_changed();
+        self.as_mut().display_volume(volume_id);
 
         let qt_thread = self.qt_thread();
         std::thread::spawn(move || {
@@ -773,10 +897,13 @@ impl qobject::Controller {
                 Ok(handle) => handle,
                 Err(error) => {
                     let _ = qt_thread.queue(move |controller| {
-                        controller.apply_update(UiUpdate::Failed {
-                            operation: JobOperation::Defragmentation,
-                            message: error.to_string(),
-                        })
+                        controller.apply_update(
+                            volume_id,
+                            UiUpdate::Failed {
+                                operation: JobOperation::Defragmentation,
+                                message: error.to_string(),
+                            },
+                        )
                     });
                     return;
                 }
@@ -847,7 +974,7 @@ impl qobject::Controller {
                             | UiUpdate::Failed { .. }
                     );
                     if qt_thread
-                        .queue(move |controller| controller.apply_update(update))
+                        .queue(move |controller| controller.apply_update(volume_id, update))
                         .is_err()
                     {
                         handle.cancel();
@@ -939,6 +1066,12 @@ impl qobject::Controller {
         self.volume_row(index)
             .and_then(|volume| self.analyses.get(&volume.id))
             .map_or(-1, |analysis| analysis.fragmented_basis_points)
+    }
+
+    fn volume_active_operation(&self, index: i32) -> QString {
+        self.volume_row(index)
+            .and_then(|volume| self.jobs.get(&volume.id))
+            .map_or_else(QString::default, |job| QString::from(&job.operation))
     }
 
     fn file_path(&self, index: i32) -> QString {
@@ -1035,11 +1168,22 @@ impl qobject::Controller {
         self.as_mut().set_plan_revision(0);
         self.as_mut().set_plan_available(false);
         self.as_mut().set_plan_message(QString::default());
+        self.as_mut().set_busy(false);
+        self.as_mut().set_paused(false);
+        self.as_mut().set_analyzing_volume_id(QString::default());
+        self.as_mut().set_active_operation(QString::default());
         self.as_mut().set_has_report(false);
         self.as_mut().set_files_scanned(0.0);
         self.as_mut().set_bytes_scanned(0.0);
         self.as_mut().set_skipped_entries(0.0);
         self.as_mut().set_plan_estimated_rewrite_bytes(0.0);
+        self.as_mut().set_defrag_files_completed(0.0);
+        self.as_mut().set_defrag_files_total(0.0);
+        self.as_mut().set_defrag_bytes_moved(0.0);
+        self.as_mut().set_defrag_bytes_total(0.0);
+        self.as_mut().set_activity_data(QByteArray::default());
+        let activity_revision = self.activity_revision.wrapping_add(1);
+        self.as_mut().set_activity_revision(activity_revision);
         self.as_mut().set_status(QString::default());
         let revision = self.map_revision.wrapping_add(1);
         self.as_mut().set_map_revision(revision);
@@ -1047,52 +1191,73 @@ impl qobject::Controller {
 
     fn display_volume(mut self: Pin<&mut Self>, volume_id: VolumeId) {
         self.as_mut().rust_mut().visible_volume_id = Some(volume_id);
-        let active = (self.active_volume_id == Some(volume_id)).then(|| {
-            (
-                self.active_map_bins.clone(),
-                self.active_files_scanned,
-                self.active_bytes_scanned,
-                self.active_status.clone(),
-            )
-        });
-        let cached = self.analyses.get(&volume_id).cloned();
+        let job = self.jobs.get(&volume_id).cloned();
+        let cached = job
+            .as_ref()
+            .is_none_or(|job| job.operation != "analysis")
+            .then(|| self.analyses.get(&volume_id).cloned())
+            .flatten();
         self.as_mut().clear_display();
 
         let volume_id_string = QString::from(&volume_id.0.to_string());
-        if let Some((map_bins, files, bytes, status)) = active {
-            self.as_mut().rust_mut().map_bins = map_bins;
-            self.as_mut().set_map_volume_id(volume_id_string);
-            self.as_mut().set_files_scanned(files);
-            self.as_mut().set_bytes_scanned(bytes);
-            self.as_mut().set_status(QString::from(&status));
-            return;
+        if let Some(cached) = cached {
+            let file_row_count = count_i32(cached.file_rows.len());
+            self.as_mut().rust_mut().analysis_id = cached.analysis_id;
+            self.as_mut().rust_mut().map_bins = cached.map_bins;
+            self.as_mut().rust_mut().file_rows = cached.file_rows;
+            self.as_mut().rust_mut().map_files = cached.map_files;
+            self.as_mut().rust_mut().map_file_ranges = cached.map_file_ranges;
+            self.as_mut().set_map_volume_id(volume_id_string.clone());
+            self.as_mut().set_report_volume_id(volume_id_string.clone());
+            self.as_mut()
+                .set_fragmented_basis_points(cached.fragmented_basis_points);
+            self.as_mut()
+                .set_coverage_basis_points(cached.coverage_basis_points);
+            self.as_mut().set_file_row_count(file_row_count);
+            self.as_mut().set_files_scanned(cached.files_scanned);
+            self.as_mut().set_bytes_scanned(cached.bytes_scanned);
+            self.as_mut().set_skipped_entries(cached.skipped_entries);
+            self.as_mut().set_has_report(true);
+            self.as_mut().set_status(QString::from(&cached.status));
         }
 
-        let Some(cached) = cached else {
-            return;
-        };
-        let file_row_count = count_i32(cached.file_rows.len());
-        self.as_mut().rust_mut().analysis_id = cached.analysis_id;
-        self.as_mut().rust_mut().map_bins = cached.map_bins;
-        self.as_mut().rust_mut().file_rows = cached.file_rows;
-        self.as_mut().rust_mut().map_files = cached.map_files;
-        self.as_mut().rust_mut().map_file_ranges = cached.map_file_ranges;
-        self.as_mut().set_map_volume_id(volume_id_string.clone());
-        self.as_mut().set_report_volume_id(volume_id_string);
-        self.as_mut()
-            .set_fragmented_basis_points(cached.fragmented_basis_points);
-        self.as_mut()
-            .set_coverage_basis_points(cached.coverage_basis_points);
-        self.as_mut().set_file_row_count(file_row_count);
-        self.as_mut().set_files_scanned(cached.files_scanned);
-        self.as_mut().set_bytes_scanned(cached.bytes_scanned);
-        self.as_mut().set_skipped_entries(cached.skipped_entries);
-        self.as_mut().set_has_report(true);
-        self.as_mut().set_status(QString::from(&cached.status));
+        if let Some(status) = self.volume_statuses.get(&volume_id).cloned() {
+            self.as_mut().set_status(QString::from(&status));
+        }
+
+        if let Some(job) = job {
+            if !job.map_bins.is_empty() {
+                self.as_mut().rust_mut().map_bins = job.map_bins;
+                self.as_mut().set_map_volume_id(volume_id_string.clone());
+                let revision = self.map_revision.wrapping_add(1);
+                self.as_mut().set_map_revision(revision);
+            }
+            self.as_mut().set_busy(true);
+            self.as_mut().set_paused(job.paused);
+            self.as_mut().set_analyzing_volume_id(volume_id_string);
+            self.as_mut()
+                .set_active_operation(QString::from(&job.operation));
+            self.as_mut().set_files_scanned(job.files_scanned);
+            self.as_mut().set_bytes_scanned(job.bytes_scanned);
+            self.as_mut()
+                .set_defrag_files_completed(job.files_completed);
+            self.as_mut().set_defrag_files_total(job.files_total);
+            self.as_mut().set_defrag_bytes_moved(job.bytes_moved);
+            self.as_mut().set_defrag_bytes_total(job.bytes_total);
+            self.as_mut().set_status(QString::from(&job.status));
+            let activity = encode_activity(&job.activity_reading, &job.activity_writing);
+            self.as_mut()
+                .set_activity_data(QByteArray::from(activity.as_slice()));
+            let revision = self.activity_revision.wrapping_add(1);
+            self.as_mut().set_activity_revision(revision);
+        }
     }
 
-    fn active_is_visible(&self) -> bool {
-        self.active_volume_id.is_some() && self.active_volume_id == self.visible_volume_id
+    fn job_registry_changed(mut self: Pin<&mut Self>) {
+        let any_busy = !self.jobs.is_empty();
+        self.as_mut().set_any_busy(any_busy);
+        let revision = self.job_revision.wrapping_add(1).max(1);
+        self.as_mut().set_job_revision(revision);
     }
 
     fn render_map(
@@ -1129,12 +1294,17 @@ impl qobject::Controller {
         });
     }
 
-    fn apply_update(mut self: Pin<&mut Self>, update: UiUpdate) {
+    fn apply_update(mut self: Pin<&mut Self>, volume_id: VolumeId, update: UiUpdate) {
         match update {
             UiUpdate::Map { full, bins } => {
-                merge_map_bins(&mut self.as_mut().rust_mut().active_map_bins, full, bins);
-                if self.active_is_visible() {
-                    self.as_mut().rust_mut().map_bins = self.active_map_bins.clone();
+                let visible_bins = self
+                    .as_mut()
+                    .rust_mut()
+                    .merge_job_map(volume_id, full, bins);
+                if self.visible_volume_id == Some(volume_id)
+                    && let Some(bins) = visible_bins
+                {
+                    self.as_mut().rust_mut().map_bins = bins;
                     let revision = self.map_revision.wrapping_add(1);
                     self.as_mut().set_map_revision(revision);
                 }
@@ -1144,10 +1314,10 @@ impl qobject::Controller {
                 bytes,
                 detail,
             } => {
-                self.as_mut().rust_mut().active_files_scanned = files as f64;
-                self.as_mut().rust_mut().active_bytes_scanned = bytes as f64;
-                self.as_mut().rust_mut().active_status = detail.clone();
-                if self.active_is_visible() {
+                self.as_mut()
+                    .rust_mut()
+                    .update_job_progress(volume_id, files, bytes, &detail);
+                if self.visible_volume_id == Some(volume_id) {
                     self.as_mut().set_files_scanned(files as f64);
                     self.as_mut().set_bytes_scanned(bytes as f64);
                     self.as_mut().set_status(QString::from(&detail));
@@ -1160,13 +1330,20 @@ impl qobject::Controller {
                 bytes_total,
                 detail,
             } => {
-                self.as_mut()
-                    .set_defrag_files_completed(files_completed as f64);
-                self.as_mut().set_defrag_files_total(files_total as f64);
-                self.as_mut().set_defrag_bytes_moved(bytes_moved as f64);
-                self.as_mut().set_defrag_bytes_total(bytes_total as f64);
-                self.as_mut().rust_mut().active_status = detail.clone();
-                if self.active_is_visible() {
+                self.as_mut().rust_mut().update_job_optimization_progress(
+                    volume_id,
+                    files_completed,
+                    files_total,
+                    bytes_moved,
+                    bytes_total,
+                    &detail,
+                );
+                if self.visible_volume_id == Some(volume_id) {
+                    self.as_mut()
+                        .set_defrag_files_completed(files_completed as f64);
+                    self.as_mut().set_defrag_files_total(files_total as f64);
+                    self.as_mut().set_defrag_bytes_moved(bytes_moved as f64);
+                    self.as_mut().set_defrag_bytes_total(bytes_total as f64);
                     self.as_mut().set_status(QString::from(&detail));
                 }
             }
@@ -1175,105 +1352,98 @@ impl qobject::Controller {
                 report,
             } => {
                 update_volume_occupancy(&mut self.as_mut().rust_mut().volumes, &report);
-                let (volume_id, cached) = cache_report(report, Some(analysis_id));
-                self.as_mut().rust_mut().analyses.insert(volume_id, cached);
+                let (report_volume_id, cached) = cache_report(report, Some(analysis_id));
+                self.as_mut()
+                    .rust_mut()
+                    .analyses
+                    .insert(report_volume_id, cached);
                 let analysis_revision = self.analysis_revision.wrapping_add(1);
                 self.as_mut().set_analysis_revision(analysis_revision);
-                self.as_mut().rust_mut().worker = None;
-                self.as_mut().rust_mut().active_volume_id = None;
-                self.as_mut().rust_mut().active_map_bins.clear();
-                self.as_mut().rust_mut().active_status.clear();
-                self.as_mut().set_busy(false);
-                self.as_mut().set_paused(false);
-                self.as_mut().set_analyzing_volume_id(QString::default());
-                self.as_mut().set_active_operation(QString::default());
-                if self.visible_volume_id == Some(volume_id) {
-                    self.as_mut().display_volume(volume_id);
+                self.as_mut().rust_mut().jobs.remove(&volume_id);
+                self.as_mut().job_registry_changed();
+                if self.visible_volume_id == Some(report_volume_id) {
+                    self.as_mut().display_volume(report_volume_id);
                 }
             }
             UiUpdate::Activity { reading, writing } => {
-                let data = encode_activity(&reading, &writing);
                 self.as_mut()
-                    .set_activity_data(QByteArray::from(data.as_slice()));
-                let revision = self.activity_revision.wrapping_add(1);
-                self.as_mut().set_activity_revision(revision);
+                    .rust_mut()
+                    .update_job_activity(volume_id, &reading, &writing);
+                if self.visible_volume_id == Some(volume_id) {
+                    let data = encode_activity(&reading, &writing);
+                    self.as_mut()
+                        .set_activity_data(QByteArray::from(data.as_slice()));
+                    let revision = self.activity_revision.wrapping_add(1);
+                    self.as_mut().set_activity_revision(revision);
+                }
             }
             UiUpdate::DefragFinished { report, stopped } => {
-                let operation = self.operation_title();
+                let operation = self
+                    .jobs
+                    .get(&volume_id)
+                    .map_or("Optimization", VolumeJobState::title);
                 update_volume_occupancy(&mut self.as_mut().rust_mut().volumes, &report);
-                let (volume_id, cached) = cache_report(report, None);
-                self.as_mut().rust_mut().analyses.insert(volume_id, cached);
-                self.as_mut().rust_mut().worker = None;
-                self.as_mut().rust_mut().active_volume_id = None;
-                self.as_mut().rust_mut().active_map_bins.clear();
-                self.as_mut().rust_mut().active_status.clear();
-                self.as_mut().set_activity_data(QByteArray::default());
-                self.as_mut().set_busy(false);
-                self.as_mut().set_paused(false);
-                self.as_mut().set_analyzing_volume_id(QString::default());
-                self.as_mut().set_active_operation(QString::default());
+                let (report_volume_id, cached) = cache_report(report, None);
+                self.as_mut()
+                    .rust_mut()
+                    .analyses
+                    .insert(report_volume_id, cached);
+                self.as_mut().rust_mut().jobs.remove(&volume_id);
+                self.as_mut().job_registry_changed();
                 let analysis_revision = self.analysis_revision.wrapping_add(1);
                 self.as_mut().set_analysis_revision(analysis_revision);
-                if self.visible_volume_id == Some(volume_id) {
-                    self.as_mut().display_volume(volume_id);
-                    self.as_mut().set_status(QString::from(&if stopped {
-                        format!("{operation} stopped safely")
-                    } else {
-                        format!("{operation} complete")
-                    }));
+                let completion = if stopped {
+                    format!("{operation} stopped safely")
+                } else {
+                    format!("{operation} complete")
+                };
+                self.as_mut()
+                    .rust_mut()
+                    .volume_statuses
+                    .insert(report_volume_id, completion.clone());
+                if self.visible_volume_id == Some(report_volume_id) {
+                    self.as_mut().display_volume(report_volume_id);
+                    self.as_mut().set_status(QString::from(&completion));
                 }
             }
             UiUpdate::Cancelled => {
-                let active_volume_id = self.active_volume_id;
-                let operation = self.operation_title();
-                self.as_mut().rust_mut().worker = None;
-                self.as_mut().rust_mut().active_volume_id = None;
-                self.as_mut().rust_mut().active_map_bins.clear();
-                self.as_mut().rust_mut().active_status.clear();
-                self.as_mut().set_busy(false);
-                self.as_mut().set_paused(false);
-                self.as_mut().set_analyzing_volume_id(QString::default());
-                self.as_mut().set_active_operation(QString::default());
-                self.as_mut().set_activity_data(QByteArray::default());
-                if let Some(volume_id) = active_volume_id
-                    && Some(volume_id) == self.visible_volume_id
-                {
+                let operation = self
+                    .jobs
+                    .get(&volume_id)
+                    .map_or("Operation", VolumeJobState::title);
+                self.as_mut().rust_mut().jobs.remove(&volume_id);
+                self.as_mut().job_registry_changed();
+                let message = format!("{operation} cancelled");
+                self.as_mut()
+                    .rust_mut()
+                    .volume_statuses
+                    .insert(volume_id, message.clone());
+                if self.visible_volume_id == Some(volume_id) {
                     self.as_mut().display_volume(volume_id);
-                    self.as_mut()
-                        .set_status(QString::from(&format!("{operation} cancelled")));
+                    self.as_mut().set_status(QString::from(&message));
                 }
             }
             UiUpdate::Failed { operation, message } => {
-                let active_volume_id = self.active_volume_id;
-                self.as_mut().rust_mut().worker = None;
-                self.as_mut().rust_mut().active_volume_id = None;
-                self.as_mut().rust_mut().active_map_bins.clear();
-                self.as_mut().rust_mut().active_status.clear();
-                self.as_mut().set_busy(false);
-                self.as_mut().set_paused(false);
-                self.as_mut().set_analyzing_volume_id(QString::default());
-                self.as_mut().set_active_operation(QString::default());
-                self.as_mut().set_activity_data(QByteArray::default());
-                if let Some(volume_id) = active_volume_id
-                    && Some(volume_id) == self.visible_volume_id
-                {
-                    self.as_mut().display_volume(volume_id);
-                    let operation = match operation {
+                let operation_title = self
+                    .jobs
+                    .get(&volume_id)
+                    .map(VolumeJobState::title)
+                    .unwrap_or(match operation {
                         JobOperation::Analysis => "Analysis",
                         JobOperation::Defragmentation => "Defragmentation",
-                    };
-                    self.as_mut()
-                        .set_status(QString::from(&format!("{operation} failed: {message}")));
+                    });
+                self.as_mut().rust_mut().jobs.remove(&volume_id);
+                self.as_mut().job_registry_changed();
+                let failure = format!("{operation_title} failed: {message}");
+                self.as_mut()
+                    .rust_mut()
+                    .volume_statuses
+                    .insert(volume_id, failure.clone());
+                if self.visible_volume_id == Some(volume_id) {
+                    self.as_mut().display_volume(volume_id);
+                    self.as_mut().set_status(QString::from(&failure));
                 }
             }
-        }
-    }
-
-    fn operation_title(&self) -> &'static str {
-        match self.active_operation.to_string().as_str() {
-            "defragmentation" => "Defragmentation",
-            "compaction" => "Compaction",
-            _ => "Analysis",
         }
     }
 }
@@ -1708,6 +1878,80 @@ fn metadata_values(metadata: MetadataMix) -> [u16; 9] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_updates_are_isolated_by_volume_id() {
+        let first_id = VolumeId(1);
+        let second_id = VolumeId(2);
+        let second_map = MapBin {
+            offset_bytes: 2_000,
+            length_bytes: 500,
+            mix: CategoryMix {
+                free: 10_000,
+                ..CategoryMix::default()
+            },
+        };
+        let mut controller = ControllerRust::default();
+        controller.jobs.insert(
+            first_id,
+            VolumeJobState::new("compaction", None, Vec::new()),
+        );
+        let mut second_job = VolumeJobState::new("analysis", None, vec![second_map.clone()]);
+        second_job.status = "second drive untouched".to_owned();
+        second_job.files_scanned = 7.0;
+        controller.jobs.insert(second_id, second_job);
+
+        let first_map = MapBin {
+            offset_bytes: 100,
+            length_bytes: 900,
+            mix: CategoryMix {
+                defrag_staging: 10_000,
+                ..CategoryMix::default()
+            },
+        };
+        controller.merge_job_map(first_id, true, vec![first_map.clone()]);
+        controller.update_job_progress(first_id, 12, 34, "scanning first drive");
+        controller.update_job_optimization_progress(
+            first_id,
+            3,
+            10,
+            4_096,
+            16_384,
+            "compacting first drive",
+        );
+        controller.update_job_activity(
+            first_id,
+            &[PhysicalRange {
+                offset_bytes: 100,
+                length_bytes: 64,
+            }],
+            &[PhysicalRange {
+                offset_bytes: 800,
+                length_bytes: 64,
+            }],
+        );
+
+        let first = controller.jobs.get(&first_id).expect("first job");
+        assert_eq!(first.map_bins, vec![first_map]);
+        assert_eq!(first.files_scanned, 12.0);
+        assert_eq!(first.bytes_scanned, 34.0);
+        assert_eq!(first.files_completed, 3.0);
+        assert_eq!(first.files_total, 10.0);
+        assert_eq!(first.bytes_moved, 4_096.0);
+        assert_eq!(first.bytes_total, 16_384.0);
+        assert_eq!(first.status, "compacting first drive");
+        assert_eq!(first.activity_reading[0].offset_bytes, 100);
+        assert_eq!(first.activity_writing[0].offset_bytes, 800);
+
+        let second = controller.jobs.get(&second_id).expect("second job");
+        assert_eq!(second.map_bins, vec![second_map]);
+        assert_eq!(second.files_scanned, 7.0);
+        assert_eq!(second.bytes_scanned, 0.0);
+        assert_eq!(second.files_completed, 0.0);
+        assert_eq!(second.status, "second drive untouched");
+        assert!(second.activity_reading.is_empty());
+        assert!(second.activity_writing.is_empty());
+    }
 
     #[test]
     fn cached_analysis_is_invalid_after_mount_state_changes() {

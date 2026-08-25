@@ -45,6 +45,7 @@ Kirigami.ApplicationWindow {
     }
     readonly property bool selectedJobFailed: controller.status.startsWith("Analysis failed:")
         || controller.status.startsWith("Defragmentation failed:")
+        || controller.status.startsWith("Compaction failed:")
     onSelectedVolumeIdChanged: controller.select_volume(selectedVolumeId)
     function bytes(value) {
         if (!value) return "0 B"
@@ -93,7 +94,7 @@ Kirigami.ApplicationWindow {
         Controls.Menu {
             title: qsTr("Action")
             Controls.MenuItem { text: qsTr("Refresh volumes"); onTriggered: controller.refresh() }
-            Controls.MenuItem { text: qsTr("Analyze"); enabled: window.selectedIndex >= 0 && !controller.busy; onTriggered: analyzeSelected() }
+            Controls.MenuItem { text: qsTr("Analyze"); enabled: window.selectedIndex >= 0 && !controller.any_busy; onTriggered: analyzeSelected() }
             Controls.MenuSeparator {}
             Controls.MenuItem { text: qsTr("Quit"); onTriggered: Qt.quit() }
         }
@@ -193,6 +194,7 @@ Kirigami.ApplicationWindow {
                     delegate: Rectangle {
                         required property int index
                         readonly property int volumeRevision: controller.volume_revision
+                        readonly property int jobRevision: controller.job_revision
                         readonly property string volumeId: {
                             const revision = volumeRevision
                             return controller.volume_id(index)
@@ -211,6 +213,10 @@ Kirigami.ApplicationWindow {
                         }
                         readonly property int statsRevision: controller.analysis_revision
                             + volumeRevision
+                        readonly property string activeOperation: {
+                            const revision = jobRevision
+                            return controller.volume_active_operation(index)
+                        }
                         readonly property double capacityBytes: {
                             const revision = statsRevision
                             return controller.volume_capacity_bytes(index)
@@ -315,11 +321,13 @@ Kirigami.ApplicationWindow {
                             height: parent.height
                             text: {
                                 const revision = controller.analysis_revision
-                                return controller.busy && String(controller.analyzing_volume_id) === volumeId
-                                    ? (controller.active_operation === "compaction"
+                                return activeOperation.length > 0
+                                    ? (activeOperation === "compaction"
                                         ? qsTr("Compacting…")
-                                        : (controller.active_operation === "defragmentation"
-                                            ? qsTr("Defragmenting…") : qsTr("Analyzing…")))
+                                        : (activeOperation === "defragmentation"
+                                            ? qsTr("Defragmenting…")
+                                            : (activeOperation === "unmount"
+                                                ? qsTr("Unmounting…") : qsTr("Analyzing…"))))
                                     : (controller.volume_has_report(index)
                                         ? qsTr("Analyzed")
                                         : (controller.volume_supported(index) ? "" : qsTr("Unsupported")))
@@ -587,9 +595,9 @@ Kirigami.ApplicationWindow {
 
         RowLayout {
             Layout.fillWidth: true
-            Controls.Button { text: qsTr("Analyze"); icon.name: "system-search"; enabled: window.selectedIndex >= 0 && !controller.busy; onClicked: window.analyzeSelected() }
-            Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && window.selectedHasReport; onClicked: controller.build_plan() }
-            Controls.Button { text: qsTr("Compact…"); icon.name: "transform-move"; enabled: !controller.busy && window.selectedHasReport && (window.selectedRequiresUnmount || controller.volume_can_compact(window.selectedIndex)); onClicked: controller.build_compact_plan() }
+            Controls.Button { text: qsTr("Analyze"); icon.name: "system-search"; enabled: window.selectedIndex >= 0 && !controller.any_busy; onClicked: window.analyzeSelected() }
+            Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.any_busy && window.selectedHasReport; onClicked: controller.build_plan() }
+            Controls.Button { text: qsTr("Compact…"); icon.name: "transform-move"; enabled: !controller.any_busy && window.selectedHasReport && (window.selectedRequiresUnmount || controller.volume_can_compact(window.selectedIndex)); onClicked: controller.build_compact_plan() }
             Item { Layout.preferredWidth: Kirigami.Units.largeSpacing }
             Controls.Button { text: controller.paused ? qsTr("Resume") : qsTr("Pause"); enabled: controller.busy && controller.active_operation !== "unmount"; onClicked: controller.paused ? controller.resume() : controller.pause() }
             Controls.Button { text: qsTr("Stop"); icon.name: "process-stop"; enabled: controller.busy && controller.active_operation !== "unmount"; onClicked: controller.stop() }
@@ -694,7 +702,7 @@ Kirigami.ApplicationWindow {
                     text: controller.plan_is_compact ? qsTr("Start compaction") : qsTr("Start defragmentation")
                     icon.name: "media-playback-start"
                     enabled: controller.plan_available
-                        && controller.plan_candidate_count > 0 && !controller.busy
+                        && controller.plan_candidate_count > 0 && !controller.any_busy
                     onClicked: {
                         planWindow.close()
                         controller.start_defrag()
