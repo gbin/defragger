@@ -28,12 +28,12 @@ Defragger runs on Linux with Qt 6 and KDE Kirigami. KDE Plasma is the primary
 desktop target, but the project is not specific to Arch Linux. Privileged mode
 requires systemd, PolicyKit, and an active graphical PolicyKit agent.
 
-| Filesystem | Analysis | Defragmentation / compaction |
-| --- | --- | --- |
-| ext4 | Mounted or offline | Supported |
-| FAT16/FAT32 | Mounted or offline | Offline volumes only |
-| FAT12 | Mounted or offline | Analysis only |
-| exFAT | Mounted | Analysis only |
+| Filesystem | Analysis | Defragmentation | Compaction |
+| --- | --- | --- | --- |
+| ext4 | Online | Online | — |
+| FAT16/FAT32 | Online | Offline | Offline |
+| FAT12 | Online | — | — |
+| exFAT | Online | — | — |
 
 The build requires Rust 1.85 or newer, CMake 3.24 or newer, Qt 6 Base and
 Declarative, Kirigami, a Qt Quick Controls desktop style, PolicyKit, and a C++
