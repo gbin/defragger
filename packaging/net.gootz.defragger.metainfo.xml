@@ -4,7 +4,7 @@
   <name>Defragger</name>
   <summary>Analyze and defragment ext4 filesystems on Linux</summary>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>GPL-3.0-or-later</project_license>
+  <project_license>MIT OR Apache-2.0</project_license>
   <description>
     <p>Defragger visualizes and defragments mounted or offline ext4 filesystems using direct Linux kernel APIs. FAT and exFAT analysis is also available.</p>
   </description>

@@ -60,3 +60,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/net.gootz.defragger.Helper.service"
     DESTINATION "${CMAKE_INSTALL_DATADIR}/dbus-1/system-services")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/defragger-helper.service"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/systemd/system")
+install(FILES LICENSE-APACHE LICENSE-MIT
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/${PROJECT_NAME}")
+install(FILES packaging/ICON_ATTRIBUTION.md
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/${PROJECT_NAME}/packaging")
+install(FILES LICENSES/LGPL-2.1-only.txt
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/${PROJECT_NAME}/LICENSES")

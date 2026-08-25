@@ -1,6 +1,6 @@
 # Defragger
 
-[![License: GPL v3+](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
+[![License: MIT or Apache 2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 [![Rust 1.85+](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://kernel.org/)
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-red.svg)
@@ -78,3 +78,14 @@ sudo systemctl daemon-reload
 This installs the application, CLI, root-owned D-Bus helper, systemd service,
 and PolicyKit actions. See the [architecture notes](docs/architecture.md) for
 the privilege boundaries and implementation details.
+
+## License
+
+Copyright 2026 Guillaume Binet.
+
+Defragger is dual-licensed under the [MIT License](LICENSE-MIT) or the
+[Apache License 2.0](LICENSE-APACHE), at your option.
+
+Third-party components and assets remain under their respective licenses. In
+particular, the application icon is from KDE's Breeze Icons project; see its
+[attribution and licensing details](packaging/ICON_ATTRIBUTION.md).
