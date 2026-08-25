@@ -283,7 +283,7 @@ pub enum ServiceEvent {
         plan_id: PlanId,
     },
     DefragProgress(DefragProgress),
-    DefragActivity {
+    DefragPendingIo {
         job_id: JobId,
         reading: Vec<PhysicalRange>,
         writing: Vec<PhysicalRange>,

@@ -436,8 +436,8 @@ impl EventSink for ChannelSink {
         let _ = self.sender.send(ServiceEvent::DefragProgress(progress));
     }
 
-    fn defrag_activity(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>) {
-        let _ = self.sender.send(ServiceEvent::DefragActivity {
+    fn defrag_pending_io(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>) {
+        let _ = self.sender.send(ServiceEvent::DefragPendingIo {
             job_id: self.job_id,
             reading,
             writing,

@@ -656,7 +656,7 @@ fn execute_plan(
             let current_extents = linux::fiemap_sync(&target)?;
             let reading = physical_for_logical(&current_extents, logical_bytes, requested_bytes);
             let writing = physical_for_logical(&donor_extents, logical_bytes, requested_bytes);
-            events.defrag_activity(reading, writing);
+            events.defrag_pending_io(reading, writing);
             events.defrag_progress(DefragProgress {
                 job_id,
                 phase: DefragPhase::MovingExtents,
@@ -697,7 +697,7 @@ fn execute_plan(
             let staging = extent_ranges(&linux::fiemap_sync(&donor)?);
             refresh_report_map(root, &mut report, &staging, events)?;
             events.defrag_file_updated(fresh, report.fragmentation.clone(), bytes_moved);
-            events.defrag_activity(Vec::new(), Vec::new());
+            events.defrag_pending_io(Vec::new(), Vec::new());
             if control.is_cancelled() {
                 drop(donor);
                 refresh_report_map(root, &mut report, &[], events)?;
@@ -712,7 +712,7 @@ fn execute_plan(
         files_completed = files_completed.saturating_add(1);
     }
 
-    events.defrag_activity(Vec::new(), Vec::new());
+    events.defrag_pending_io(Vec::new(), Vec::new());
     refresh_report_map(root, &mut report, &[], events)?;
     normalize_finished_report(plan, root, &mut report);
     Ok(PlanExecution {
@@ -920,7 +920,7 @@ mod tests {
         fn progress(&self, _: JobProgress) {}
         fn map_updated(&self, _: bool, _: Vec<defrag_domain::MapBin>) {}
         fn defrag_progress(&self, _: DefragProgress) {}
-        fn defrag_activity(&self, _: Vec<PhysicalRange>, _: Vec<PhysicalRange>) {}
+        fn defrag_pending_io(&self, _: Vec<PhysicalRange>, _: Vec<PhysicalRange>) {}
         fn defrag_file_updated(&self, _: FileReport, _: FragmentationMetrics, _: u64) {}
     }
 

@@ -210,10 +210,10 @@ fn defrag(
                 progress.bytes_total,
                 display_path(progress.current_path)
             ),
-            Ok(ServiceEvent::DefragActivity {
+            Ok(ServiceEvent::DefragPendingIo {
                 reading, writing, ..
             }) => eprintln!(
-                "ACTIVITY read={} write={}",
+                "PENDING_IO read={} write={}",
                 ranges(&reading),
                 ranges(&writing)
             ),

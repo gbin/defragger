@@ -25,7 +25,9 @@ pub trait EventSink: Send + Sync {
     fn progress(&self, progress: defrag_domain::JobProgress);
     fn map_updated(&self, full_snapshot: bool, bins: Vec<defrag_domain::MapBin>);
     fn defrag_progress(&self, progress: DefragProgress);
-    fn defrag_activity(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>);
+    /// Publish physical I/O that has been announced but is not yet reflected
+    /// in the drive map. An empty pair clears the pending set.
+    fn defrag_pending_io(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>);
     fn defrag_file_updated(
         &self,
         file: defrag_domain::FileReport,

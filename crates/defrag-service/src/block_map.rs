@@ -115,6 +115,10 @@ impl BinAccumulator {
         self.changed.extend(changed);
     }
 
+    pub(crate) fn pending_change_count(&self) -> usize {
+        self.changed.len()
+    }
+
     fn for_overlaps(
         &mut self,
         physical: u64,

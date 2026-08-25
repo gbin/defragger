@@ -14,7 +14,7 @@ mod qobject {
         #[qobject]
         #[qml_element]
         #[qproperty(QByteArray, display_map_data)]
-        #[qproperty(QByteArray, activity_data)]
+        #[qproperty(QByteArray, pending_io_data)]
         #[qproperty(QString, status)]
         #[qproperty(QString, map_volume_id)]
         #[qproperty(QString, report_volume_id)]
@@ -26,7 +26,7 @@ mod qobject {
         #[qproperty(i32, map_revision)]
         #[qproperty(i32, analysis_revision)]
         #[qproperty(i32, display_map_generation)]
-        #[qproperty(i32, activity_revision)]
+        #[qproperty(i32, pending_io_revision)]
         #[qproperty(i32, fragmented_basis_points)]
         #[qproperty(i32, coverage_basis_points)]
         #[qproperty(i32, file_row_count)]
@@ -205,7 +205,7 @@ enum UiUpdate {
         analysis_id: AnalysisId,
         report: UiReport,
     },
-    Activity {
+    PendingIo {
         reading: Vec<PhysicalRange>,
         writing: Vec<PhysicalRange>,
     },
@@ -274,8 +274,8 @@ struct VolumeJobState {
     files_scanned: f64,
     bytes_scanned: f64,
     status: String,
-    activity_reading: Vec<PhysicalRange>,
-    activity_writing: Vec<PhysicalRange>,
+    pending_reading: Vec<PhysicalRange>,
+    pending_writing: Vec<PhysicalRange>,
     files_completed: f64,
     files_total: f64,
     bytes_moved: f64,
@@ -292,8 +292,8 @@ impl VolumeJobState {
             files_scanned: 0.0,
             bytes_scanned: 0.0,
             status: String::new(),
-            activity_reading: Vec::new(),
-            activity_writing: Vec::new(),
+            pending_reading: Vec::new(),
+            pending_writing: Vec::new(),
             files_completed: 0.0,
             files_total: 0.0,
             bytes_moved: 0.0,
@@ -313,7 +313,7 @@ impl VolumeJobState {
 
 pub struct ControllerRust {
     display_map_data: QByteArray,
-    activity_data: QByteArray,
+    pending_io_data: QByteArray,
     status: QString,
     map_volume_id: QString,
     report_volume_id: QString,
@@ -325,7 +325,7 @@ pub struct ControllerRust {
     map_revision: i32,
     analysis_revision: i32,
     display_map_generation: i32,
-    activity_revision: i32,
+    pending_io_revision: i32,
     fragmented_basis_points: i32,
     coverage_basis_points: i32,
     file_row_count: i32,
@@ -369,7 +369,7 @@ impl Default for ControllerRust {
     fn default() -> Self {
         Self {
             display_map_data: QByteArray::default(),
-            activity_data: QByteArray::default(),
+            pending_io_data: QByteArray::default(),
             status: QString::default(),
             map_volume_id: QString::default(),
             report_volume_id: QString::default(),
@@ -381,7 +381,7 @@ impl Default for ControllerRust {
             map_revision: 0,
             analysis_revision: 0,
             display_map_generation: 0,
-            activity_revision: 0,
+            pending_io_revision: 0,
             fragmented_basis_points: -1,
             coverage_basis_points: -1,
             file_row_count: 0,
@@ -460,15 +460,15 @@ impl ControllerRust {
         }
     }
 
-    fn update_job_activity(
+    fn update_job_pending_io(
         &mut self,
         volume_id: VolumeId,
         reading: &[PhysicalRange],
         writing: &[PhysicalRange],
     ) {
         if let Some(job) = self.jobs.get_mut(&volume_id) {
-            job.activity_reading = reading.to_vec();
-            job.activity_writing = writing.to_vec();
+            job.pending_reading = reading.to_vec();
+            job.pending_writing = writing.to_vec();
         }
     }
 }
@@ -930,9 +930,9 @@ impl qobject::Controller {
                         full: full_snapshot,
                         bins,
                     }),
-                    Ok(ServiceEvent::DefragActivity {
+                    Ok(ServiceEvent::DefragPendingIo {
                         reading, writing, ..
-                    }) => Some(UiUpdate::Activity { reading, writing }),
+                    }) => Some(UiUpdate::PendingIo { reading, writing }),
                     Ok(ServiceEvent::DefragProgress(progress)) => {
                         Some(UiUpdate::OptimizationProgress {
                             files_completed: progress.files_completed,
@@ -1181,9 +1181,9 @@ impl qobject::Controller {
         self.as_mut().set_defrag_files_total(0.0);
         self.as_mut().set_defrag_bytes_moved(0.0);
         self.as_mut().set_defrag_bytes_total(0.0);
-        self.as_mut().set_activity_data(QByteArray::default());
-        let activity_revision = self.activity_revision.wrapping_add(1);
-        self.as_mut().set_activity_revision(activity_revision);
+        self.as_mut().set_pending_io_data(QByteArray::default());
+        let pending_io_revision = self.pending_io_revision.wrapping_add(1);
+        self.as_mut().set_pending_io_revision(pending_io_revision);
         self.as_mut().set_status(QString::default());
         let revision = self.map_revision.wrapping_add(1);
         self.as_mut().set_map_revision(revision);
@@ -1245,11 +1245,11 @@ impl qobject::Controller {
             self.as_mut().set_defrag_bytes_moved(job.bytes_moved);
             self.as_mut().set_defrag_bytes_total(job.bytes_total);
             self.as_mut().set_status(QString::from(&job.status));
-            let activity = encode_activity(&job.activity_reading, &job.activity_writing);
+            let activity = encode_pending_io(&job.pending_reading, &job.pending_writing);
             self.as_mut()
-                .set_activity_data(QByteArray::from(activity.as_slice()));
-            let revision = self.activity_revision.wrapping_add(1);
-            self.as_mut().set_activity_revision(revision);
+                .set_pending_io_data(QByteArray::from(activity.as_slice()));
+            let revision = self.pending_io_revision.wrapping_add(1);
+            self.as_mut().set_pending_io_revision(revision);
         }
     }
 
@@ -1365,16 +1365,16 @@ impl qobject::Controller {
                     self.as_mut().display_volume(report_volume_id);
                 }
             }
-            UiUpdate::Activity { reading, writing } => {
+            UiUpdate::PendingIo { reading, writing } => {
                 self.as_mut()
                     .rust_mut()
-                    .update_job_activity(volume_id, &reading, &writing);
+                    .update_job_pending_io(volume_id, &reading, &writing);
                 if self.visible_volume_id == Some(volume_id) {
-                    let data = encode_activity(&reading, &writing);
+                    let data = encode_pending_io(&reading, &writing);
                     self.as_mut()
-                        .set_activity_data(QByteArray::from(data.as_slice()));
-                    let revision = self.activity_revision.wrapping_add(1);
-                    self.as_mut().set_activity_revision(revision);
+                        .set_pending_io_data(QByteArray::from(data.as_slice()));
+                    let revision = self.pending_io_revision.wrapping_add(1);
+                    self.as_mut().set_pending_io_revision(revision);
                 }
             }
             UiUpdate::DefragFinished { report, stopped } => {
@@ -1510,7 +1510,7 @@ fn update_volume_occupancy(volumes: &mut [Volume], report: &UiReport) {
     }
 }
 
-fn encode_activity(reading: &[PhysicalRange], writing: &[PhysicalRange]) -> Vec<u8> {
+fn encode_pending_io(reading: &[PhysicalRange], writing: &[PhysicalRange]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity((reading.len() + writing.len()) * 24);
     for (kind, ranges) in [(1u8, reading), (2u8, writing)] {
         for range in ranges {
@@ -1919,7 +1919,7 @@ mod tests {
             16_384,
             "compacting first drive",
         );
-        controller.update_job_activity(
+        controller.update_job_pending_io(
             first_id,
             &[PhysicalRange {
                 offset_bytes: 100,
@@ -1940,8 +1940,8 @@ mod tests {
         assert_eq!(first.bytes_moved, 4_096.0);
         assert_eq!(first.bytes_total, 16_384.0);
         assert_eq!(first.status, "compacting first drive");
-        assert_eq!(first.activity_reading[0].offset_bytes, 100);
-        assert_eq!(first.activity_writing[0].offset_bytes, 800);
+        assert_eq!(first.pending_reading[0].offset_bytes, 100);
+        assert_eq!(first.pending_writing[0].offset_bytes, 800);
 
         let second = controller.jobs.get(&second_id).expect("second job");
         assert_eq!(second.map_bins, vec![second_map]);
@@ -1949,8 +1949,8 @@ mod tests {
         assert_eq!(second.bytes_scanned, 0.0);
         assert_eq!(second.files_completed, 0.0);
         assert_eq!(second.status, "second drive untouched");
-        assert!(second.activity_reading.is_empty());
-        assert!(second.activity_writing.is_empty());
+        assert!(second.pending_reading.is_empty());
+        assert!(second.pending_writing.is_empty());
     }
 
     #[test]

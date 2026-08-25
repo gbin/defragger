@@ -7,8 +7,8 @@ Item {
     id: root
 
     property var mapData
-    property var activityData
-    property int activityRevision: 0
+    property var pendingIoData
+    property int pendingIoRevision: 0
     property var detailsProvider: null
     property string volumeId: ""
     property double capacityBytes: 0
@@ -16,7 +16,7 @@ Item {
     property int sourceRevision: 0
     property int renderedGeneration: 0
     property var mapView: null
-    property var activityView: null
+    property var pendingIoView: null
     property int binCount: 0
     property int hoveredIndex: -1
     property bool workerBusy: false
@@ -68,8 +68,8 @@ Item {
     ]
 
     readonly property var activityLegendTypes: [
-        [qsTr("Reading"), readActivityColor],
-        [qsTr("Writing"), writeActivityColor]
+        [qsTr("Pending read"), readActivityColor],
+        [qsTr("Pending write"), writeActivityColor]
     ]
 
     function percent(value) {
@@ -105,21 +105,21 @@ Item {
         return mapView.getUint32(index * recordBytes + byteOffset, true)
     }
 
-    function activityKind(index) {
-        if (!activityView || !mapView)
+    function pendingIoKind(index) {
+        if (!pendingIoView || !mapView)
             return 0
         const binStart = uint64(index, 0)
         const binEnd = binStart + uint64(index, 8)
         let result = 0
-        const count = Math.floor(activityView.byteLength / 24)
+        const count = Math.floor(pendingIoView.byteLength / 24)
         for (let i = 0; i < count; ++i) {
             const offset = i * 24
-            const start = activityView.getUint32(offset, true)
-                + activityView.getUint32(offset + 4, true) * 4294967296
-            const length = activityView.getUint32(offset + 8, true)
-                + activityView.getUint32(offset + 12, true) * 4294967296
+            const start = pendingIoView.getUint32(offset, true)
+                + pendingIoView.getUint32(offset + 4, true) * 4294967296
+            const length = pendingIoView.getUint32(offset + 8, true)
+                + pendingIoView.getUint32(offset + 12, true) * 4294967296
             if (start < binEnd && start + length > binStart)
-                result |= activityView.getUint8(offset + 16)
+                result |= pendingIoView.getUint8(offset + 16)
         }
         return result
     }
@@ -294,20 +294,20 @@ Item {
         hoveredIndex = -1
         requestRebuild(false)
     }
-    function refreshActivity() {
-        if (!activityData || activityData.byteLength === 0) {
-            activityView = null
+    function refreshPendingIo() {
+        if (!pendingIoData || pendingIoData.byteLength === 0) {
+            pendingIoView = null
         } else {
             try {
-                activityView = new DataView(activityData)
+                pendingIoView = new DataView(pendingIoData)
             } catch (error) {
-                activityView = null
+                pendingIoView = null
             }
         }
         canvas.requestPaint()
     }
-    onActivityDataChanged: refreshActivity()
-    onActivityRevisionChanged: refreshActivity()
+    onPendingIoDataChanged: refreshPendingIo()
+    onPendingIoRevisionChanged: refreshPendingIo()
     onVolumeIdChanged: {
         // Selection is part of the map identity. Drop the previous volume's
         // pixels immediately, then publish a map for the new selection.
@@ -410,21 +410,36 @@ Item {
                     : Qt.rgba(0.12, 0.14, 0.16, 0.85)
                 ctx.lineWidth = i === root.hoveredIndex ? 2 : 1
                 ctx.strokeRect(x + 0.5, y + 0.5, layout.cell - 1, layout.cell - 1)
-                const activity = root.activityKind(i)
-                if (activity & 1) {
+                const activity = root.pendingIoKind(i)
+                if (activity === 3) {
+                    // A display cell can aggregate distinct pending reads and
+                    // writes. Use separate edges for the two truthful states;
+                    // nested contours look like one marker changing color.
+                    ctx.lineWidth = 2
+                    ctx.strokeStyle = root.readActivityColor
+                    ctx.beginPath()
+                    ctx.moveTo(x + 0.5, y + layout.cell - 0.5)
+                    ctx.lineTo(x + 0.5, y + 0.5)
+                    ctx.lineTo(x + layout.cell - 0.5, y + 0.5)
+                    ctx.stroke()
+                    ctx.strokeStyle = root.writeActivityColor
+                    ctx.beginPath()
+                    ctx.moveTo(x + layout.cell - 0.5, y + 0.5)
+                    ctx.lineTo(x + layout.cell - 0.5, y + layout.cell - 0.5)
+                    ctx.lineTo(x + 0.5, y + layout.cell - 0.5)
+                    ctx.stroke()
+                } else if (activity & 1) {
                     ctx.strokeStyle = root.readActivityColor
                     ctx.lineWidth = 2
                     ctx.strokeRect(x + 0.5, y + 0.5, layout.cell - 1, layout.cell - 1)
-                }
-                if (activity & 2) {
+                } else if (activity & 2) {
                     ctx.strokeStyle = root.writeActivityColor
                     ctx.lineWidth = 2
-                    const inset = activity & 1 ? 2.5 : 0.5
                     ctx.strokeRect(
-                        x + inset,
-                        y + inset,
-                        layout.cell - inset * 2,
-                        layout.cell - inset * 2
+                        x + 0.5,
+                        y + 0.5,
+                        layout.cell - 1,
+                        layout.cell - 1
                     )
                 }
             }
@@ -507,14 +522,14 @@ Item {
                     Controls.Label {
                         Layout.fillWidth: true
                         visible: root.hoveredIndex >= 0
-                            && root.activityKind(root.hoveredIndex) !== 0
+                            && root.pendingIoKind(root.hoveredIndex) !== 0
                         text: {
                             const activity = root.hoveredIndex >= 0
-                                ? root.activityKind(root.hoveredIndex) : 0
+                                ? root.pendingIoKind(root.hoveredIndex) : 0
                             if (activity === 3)
-                                return qsTr("Active: reading and writing")
+                                return qsTr("Pending: read and write")
                             return activity === 1
-                                ? qsTr("Active: reading") : qsTr("Active: writing")
+                                ? qsTr("Pending: read") : qsTr("Pending: write")
                         }
                         font.bold: true
                     }

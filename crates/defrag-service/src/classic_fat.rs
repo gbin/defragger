@@ -430,6 +430,12 @@ pub(crate) struct ClassicWriter {
     free: BTreeSet<u32>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyState {
+    Pending,
+    Completed,
+}
+
 impl ClassicWriter {
     pub(crate) fn open_exclusive(source: &str) -> Result<Self, ServiceError> {
         let file = OpenOptions::new()
@@ -480,7 +486,7 @@ impl ClassicWriter {
         file_index: usize,
         target: &[u32],
         mut checkpoint: impl FnMut() -> Result<(), ServiceError>,
-        mut activity: impl FnMut(u64, u64, u64),
+        mut copy_state: impl FnMut(CopyState, u64, u64, u64),
     ) -> Result<u64, ServiceError> {
         if target.is_empty() || self.chains.get(file_index).is_none() {
             return Ok(0);
@@ -504,8 +510,19 @@ impl ClassicWriter {
                 .ok_or_else(|| unsafe_fs("no scratch cluster exists outside the compact target"))?;
             let source_offset = self.snapshot.cluster_offset(cluster)?;
             let target_offset = self.snapshot.cluster_offset(scratch)?;
-            activity(source_offset, target_offset, self.snapshot.cluster_size());
+            copy_state(
+                CopyState::Pending,
+                source_offset,
+                target_offset,
+                self.snapshot.cluster_size(),
+            );
             self.relocate_cluster(owner, position, scratch)?;
+            copy_state(
+                CopyState::Completed,
+                source_offset,
+                target_offset,
+                self.snapshot.cluster_size(),
+            );
             moved = moved.saturating_add(self.snapshot.cluster_size());
         }
 
@@ -520,8 +537,19 @@ impl ClassicWriter {
             checkpoint()?;
             let source_offset = self.snapshot.cluster_offset(from)?;
             let target_offset = self.snapshot.cluster_offset(to)?;
-            activity(source_offset, target_offset, self.snapshot.cluster_size());
+            copy_state(
+                CopyState::Pending,
+                source_offset,
+                target_offset,
+                self.snapshot.cluster_size(),
+            );
             self.copy_and_verify(source_offset, target_offset)?;
+            copy_state(
+                CopyState::Completed,
+                source_offset,
+                target_offset,
+                self.snapshot.cluster_size(),
+            );
             moved = moved.saturating_add(self.snapshot.cluster_size());
         }
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, File, Metadata},
     io,
     os::unix::fs::{FileTypeExt, MetadataExt},
@@ -18,7 +18,7 @@ use crate::{
     AnalysisAccess, EventSink, FilesystemAnalysis, FilesystemBackend, JobControl, PlanExecution,
     PreparedPlan, ServiceError,
     block_map::BinAccumulator,
-    classic_fat::{ClassicKind, ClassicSnapshot, ClassicWriter, RawFile},
+    classic_fat::{ClassicKind, ClassicSnapshot, ClassicWriter, CopyState, RawFile},
     linux::{
         self, FIEMAP_EXTENT_DATA_ENCRYPTED, FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_DATA_TAIL,
         FIEMAP_EXTENT_DELALLOC, FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_NOT_ALIGNED,
@@ -27,6 +27,7 @@ use crate::{
 };
 
 const FAT_FILESYSTEMS: &[&str] = &["fat", "msdos", "vfat", "exfat"];
+const STAGING_UPDATE_BINS: usize = 8;
 
 pub struct FatBackend;
 
@@ -874,6 +875,98 @@ impl PreparedPlan for FatPlan {
     }
 }
 
+/// Physical I/O announced to the UI but not yet represented by a published
+/// staging-map update. FAT writes are one cluster at a time, while the map is
+/// intentionally published in batches; keeping this set explicit preserves
+/// the causal boundary between the two streams.
+#[derive(Default)]
+struct PendingIo {
+    reading: BTreeMap<u64, u64>,
+    writing: BTreeMap<u64, u64>,
+    completed_copies: Vec<(u64, u64)>,
+}
+
+impl PendingIo {
+    fn anticipate(
+        &mut self,
+        writer: &ClassicWriter,
+        moves: &[PlannedMove],
+    ) -> Result<(), ServiceError> {
+        let mut reading = BTreeMap::new();
+        let mut writing = BTreeMap::new();
+        let cluster_size = writer.snapshot.cluster_size();
+        // Keep one complete move ahead of execution. Sources come from the
+        // writer's live chains and destinations come from the validated plan;
+        // none of these ranges is inferred from rendered colors.
+        for planned in moves.iter().take(2) {
+            let source = writer
+                .current_chain(planned.file_index)
+                .ok_or_else(|| ServiceError::UnsafeFilesystem("planned file disappeared".into()))?;
+            for &cluster in source {
+                reading.insert(writer.snapshot.cluster_offset(cluster)?, cluster_size);
+            }
+            for &cluster in &planned.target {
+                writing.insert(writer.snapshot.cluster_offset(cluster)?, cluster_size);
+            }
+        }
+        self.reading = reading;
+        self.writing = writing;
+        self.completed_copies.clear();
+        Ok(())
+    }
+
+    fn begin_copy(&mut self, reading: u64, writing: u64, length: u64) -> bool {
+        // Scratch writes used by compaction cannot be known from the static
+        // move target, so add both sides when the writer resolves them.
+        let added_read = self.reading.insert(reading, length).is_none();
+        let added_write = self.writing.insert(writing, length).is_none();
+        added_read || added_write
+    }
+
+    fn complete_copy(&mut self, reading: u64, writing: u64) {
+        self.completed_copies.push((reading, writing));
+    }
+
+    fn retire_completed(&mut self) {
+        for (reading, writing) in std::mem::take(&mut self.completed_copies) {
+            self.reading.remove(&reading);
+            self.writing.remove(&writing);
+        }
+    }
+
+    fn publish(&self, events: &dyn EventSink) {
+        events.defrag_pending_io(
+            coalesced_ranges(&self.reading),
+            coalesced_ranges(&self.writing),
+        );
+    }
+
+    fn clear(&mut self, events: &dyn EventSink) {
+        self.reading.clear();
+        self.writing.clear();
+        self.completed_copies.clear();
+        events.defrag_pending_io(Vec::new(), Vec::new());
+    }
+}
+
+fn coalesced_ranges(ranges: &BTreeMap<u64, u64>) -> Vec<PhysicalRange> {
+    let mut result: Vec<PhysicalRange> = Vec::new();
+    for (&offset_bytes, &length_bytes) in ranges {
+        match result.last_mut() {
+            Some(previous)
+                if previous.offset_bytes.saturating_add(previous.length_bytes) == offset_bytes =>
+            {
+                previous.length_bytes = previous.length_bytes.saturating_add(length_bytes);
+            }
+            _ => result.push(PhysicalRange {
+                offset_bytes,
+                length_bytes,
+            }),
+        }
+    }
+    result
+}
+
 fn execute_fat_plan(
     plan: &FatPlan,
     job_id: JobId,
@@ -908,8 +1001,10 @@ fn execute_fat_plan(
     let mut live_map = staging_bins.snapshot();
     let mut bytes_moved = 0u64;
     let mut last_map_update = None;
-    let mut last_staging_update = Instant::now();
+    let mut pending_io = PendingIo::default();
     for (completed, planned) in plan.moves.iter().enumerate() {
+        pending_io.anticipate(&writer, &plan.moves[completed..])?;
+        pending_io.publish(events);
         let path = expected.files[planned.file_index].path.clone();
         events.defrag_progress(DefragProgress {
             job_id,
@@ -924,33 +1019,33 @@ fn execute_fat_plan(
             planned.file_index,
             &planned.target,
             || control.checkpoint(),
-            |reading, writing, length| {
-                events.defrag_activity(
-                    vec![PhysicalRange {
-                        offset_bytes: reading,
-                        length_bytes: length,
-                    }],
-                    vec![PhysicalRange {
-                        offset_bytes: writing,
-                        length_bytes: length,
-                    }],
-                );
-                staging_bins.mark_staging(writing, length);
-                if last_staging_update.elapsed() >= Duration::from_millis(50) {
-                    publish_staging_changes(&mut staging_bins, &mut live_map, events);
-                    last_staging_update = Instant::now();
+            |state, reading, writing, length| match state {
+                CopyState::Pending => {
+                    if pending_io.begin_copy(reading, writing, length) {
+                        pending_io.publish(events);
+                    }
+                }
+                CopyState::Completed => {
+                    pending_io.complete_copy(reading, writing);
+                    staging_bins.mark_staging(writing, length);
+                    if staging_bins.pending_change_count() >= STAGING_UPDATE_BINS {
+                        publish_staging_changes(&mut staging_bins, &mut live_map, events);
+                        pending_io.retire_completed();
+                        pending_io.publish(events);
+                    }
                 }
             },
         );
         match result {
             Ok(moved) => {
                 bytes_moved = bytes_moved.saturating_add(moved);
-                events.defrag_activity(Vec::new(), Vec::new());
                 publish_staging_changes(&mut staging_bins, &mut live_map, events);
+                pending_io.retire_completed();
+                pending_io.publish(events);
             }
             Err(ServiceError::Cancelled) => {
                 writer.finish_clean()?;
-                events.defrag_activity(Vec::new(), Vec::new());
+                pending_io.clear(events);
                 let snapshot = writer.reparse()?;
                 let report = report_from_snapshot(&plan.volume, &snapshot);
                 events.map_updated(true, report.map.clone());
@@ -959,7 +1054,10 @@ fn execute_fat_plan(
                     stopped: true,
                 });
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                pending_io.clear(events);
+                return Err(error);
+            }
         }
         let chain = writer
             .current_chain(planned.file_index)
@@ -997,7 +1095,7 @@ fn execute_fat_plan(
         });
     }
     writer.finish_clean()?;
-    events.defrag_activity(Vec::new(), Vec::new());
+    pending_io.clear(events);
     let snapshot = writer.reparse()?;
     let report = report_from_snapshot(&plan.volume, &snapshot);
     events.map_updated(true, report.map.clone());
@@ -1191,7 +1289,10 @@ mod tests {
     use super::*;
     use std::{
         io::{Read, Seek, SeekFrom, Write},
-        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        },
     };
 
     use fatfs::{FatType, FileSystem, FormatVolumeOptions, FsOptions};
@@ -1214,7 +1315,7 @@ mod tests {
         fn progress(&self, _: JobProgress) {}
         fn map_updated(&self, _: bool, _: Vec<defrag_domain::MapBin>) {}
         fn defrag_progress(&self, _: DefragProgress) {}
-        fn defrag_activity(&self, _: Vec<PhysicalRange>, _: Vec<PhysicalRange>) {}
+        fn defrag_pending_io(&self, _: Vec<PhysicalRange>, _: Vec<PhysicalRange>) {}
         fn defrag_file_updated(&self, _: FileReport, _: FragmentationMetrics, _: u64) {}
     }
 
@@ -1222,7 +1323,10 @@ mod tests {
     struct RecordingSink {
         map_updates: AtomicUsize,
         staging_updates: AtomicUsize,
-        cleared_activity: AtomicUsize,
+        cleared_pending_io: AtomicUsize,
+        max_pending_read_bytes: AtomicU64,
+        max_pending_write_bytes: AtomicU64,
+        event_order: Mutex<Vec<&'static str>>,
     }
 
     impl EventSink for RecordingSink {
@@ -1233,12 +1337,28 @@ mod tests {
             }
             if bins.iter().any(|bin| bin.mix.defrag_staging > 0) {
                 self.staging_updates.fetch_add(1, Ordering::Relaxed);
+                self.event_order.lock().unwrap().push("staging");
             }
         }
         fn defrag_progress(&self, _: DefragProgress) {}
-        fn defrag_activity(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>) {
+        fn defrag_pending_io(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>) {
             if reading.is_empty() && writing.is_empty() {
-                self.cleared_activity.fetch_add(1, Ordering::Relaxed);
+                self.cleared_pending_io.fetch_add(1, Ordering::Relaxed);
+            }
+            if !reading.is_empty() {
+                let bytes = reading.iter().fold(0_u64, |total, range| {
+                    total.saturating_add(range.length_bytes)
+                });
+                self.max_pending_read_bytes
+                    .fetch_max(bytes, Ordering::Relaxed);
+            }
+            if !writing.is_empty() {
+                let bytes = writing.iter().fold(0_u64, |total, range| {
+                    total.saturating_add(range.length_bytes)
+                });
+                self.max_pending_write_bytes
+                    .fetch_max(bytes, Ordering::Relaxed);
+                self.event_order.lock().unwrap().push("pending");
             }
         }
         fn defrag_file_updated(&self, _: FileReport, _: FragmentationMetrics, _: u64) {}
@@ -1382,7 +1502,19 @@ mod tests {
         assert!(result.report.fragmentation.total_excess_runs < before);
         assert!(events.map_updates.load(Ordering::Relaxed) >= 2);
         assert!(events.staging_updates.load(Ordering::Relaxed) >= 1);
-        assert!(events.cleared_activity.load(Ordering::Relaxed) >= 2);
+        assert!(events.cleared_pending_io.load(Ordering::Relaxed) >= 1);
+        assert!(events.max_pending_read_bytes.load(Ordering::Relaxed) >= 3 * 512);
+        assert!(events.max_pending_write_bytes.load(Ordering::Relaxed) >= 3 * 512);
+        let event_order = events.event_order.lock().unwrap();
+        let first_pending = event_order
+            .iter()
+            .position(|event| *event == "pending")
+            .unwrap();
+        let first_staging = event_order
+            .iter()
+            .position(|event| *event == "staging")
+            .unwrap();
+        assert!(first_pending < first_staging);
 
         let disk = File::open(&image.0).unwrap();
         let filesystem = FileSystem::new(disk, FsOptions::new()).unwrap();
