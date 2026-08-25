@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use defrag_domain::{AnalysisId, DefragPolicy, PlanId, ServiceEvent, VolumeId};
+use defrag_domain::{AnalysisId, DefragPolicy, MountState, PlanId, ServiceEvent, VolumeId};
 use defrag_service::{InProcessClient, JobHandle};
 use zbus::{Connection, connection::Builder, fdo, interface, message::Header, zvariant::Value};
 
@@ -61,6 +61,36 @@ impl Helper {
             .await
             .map_err(failed)?;
         serde_json::to_string(&volumes).map_err(failed)
+    }
+
+    async fn unmount_volume(
+        &self,
+        volume_id: u64,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &Connection,
+    ) -> fdo::Result<()> {
+        self.authorize(connection, &header, ACTION_MODIFY).await?;
+        let client = self.client.clone();
+        let volume = blocking::unblock(move || {
+            client
+                .list_volumes()?
+                .into_iter()
+                .find(|volume| volume.id == VolumeId(volume_id))
+                .ok_or(defrag_service::ServiceError::VolumeNotFound(VolumeId(
+                    volume_id,
+                )))
+        })
+        .await
+        .map_err(failed)?;
+        if volume.mount_state == MountState::Unmounted {
+            return Ok(());
+        }
+        if !matches!(volume.filesystem.as_str(), "fat" | "msdos" | "vfat") {
+            return Err(failed(
+                "automatic unmount is only available for classic FAT volumes",
+            ));
+        }
+        unmount_with_udisks(&volume.source).await
     }
 
     async fn start_analysis(
@@ -398,6 +428,40 @@ fn sender(header: &Header<'_>) -> fdo::Result<String> {
 
 fn failed(error: impl ToString) -> fdo::Error {
     fdo::Error::Failed(error.to_string())
+}
+
+async fn unmount_with_udisks(source: &str) -> fdo::Result<()> {
+    let connection = Connection::system().await.map_err(failed)?;
+    let manager = zbus::Proxy::new(
+        &connection,
+        "org.freedesktop.UDisks2",
+        "/org/freedesktop/UDisks2/Manager",
+        "org.freedesktop.UDisks2.Manager",
+    )
+    .await
+    .map_err(failed)?;
+    let mut device = HashMap::new();
+    device.insert("path", Value::from(source));
+    let options: HashMap<&str, Value<'_>> = HashMap::new();
+    let objects: Vec<zbus::zvariant::OwnedObjectPath> = manager
+        .call("ResolveDevice", &(device, options.clone()))
+        .await
+        .map_err(failed)?;
+    let object = objects
+        .first()
+        .ok_or_else(|| failed("the selected device is not managed by UDisks"))?;
+    let filesystem = zbus::Proxy::new(
+        &connection,
+        "org.freedesktop.UDisks2",
+        object.as_str(),
+        "org.freedesktop.UDisks2.Filesystem",
+    )
+    .await
+    .map_err(failed)?;
+    filesystem
+        .call::<_, _, ()>("Unmount", &(options))
+        .await
+        .map_err(failed)
 }
 
 /// The service retains complete analysis state for plan construction, while

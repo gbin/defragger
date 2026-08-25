@@ -285,6 +285,28 @@ fn statvfs(path: &std::path::Path) -> Option<(u64, u64)> {
 
 static NEXT_PRIVATE_MOUNT: AtomicU64 = AtomicU64::new(1);
 
+pub(crate) fn unmount(volume: &Volume) -> Result<(), ServiceError> {
+    if volume.mount_state == MountState::Unmounted {
+        return Ok(());
+    }
+    let mount_point = volume.mount_point.as_ref().ok_or_else(|| {
+        ServiceError::UnmountUnavailable("the volume has no mount point".to_owned())
+    })?;
+    let path = CString::new(mount_point.as_os_str().as_encoded_bytes()).map_err(|_| {
+        ServiceError::UnmountUnavailable("the mount point contains a NUL byte".to_owned())
+    })?;
+    // SAFETY: path is a valid NUL-terminated mount point. No force or lazy
+    // flags are used, so the kernel rejects busy volumes instead of detaching
+    // them while an application still has files open.
+    if unsafe { libc::umount(path.as_ptr()) } != 0 {
+        return Err(operation_error(
+            &format!("could not unmount {}", mount_point.display()),
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) struct JobMount {
     pub(crate) volume: Volume,
     temporary_path: Option<PathBuf>,

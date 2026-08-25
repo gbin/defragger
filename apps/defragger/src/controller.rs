@@ -21,6 +21,7 @@ mod qobject {
         #[qproperty(QString, analyzing_volume_id)]
         #[qproperty(QString, active_operation)]
         #[qproperty(i32, volume_count)]
+        #[qproperty(i32, volume_revision)]
         #[qproperty(i32, map_revision)]
         #[qproperty(i32, analysis_revision)]
         #[qproperty(i32, display_map_generation)]
@@ -67,11 +68,13 @@ mod qobject {
         #[qinvokable]
         fn start_defrag(self: Pin<&mut Controller>);
         #[qinvokable]
+        fn unmount_and_analyze(self: Pin<&mut Controller>, volume_id: &QString);
+        #[qinvokable]
         fn volume_id(self: &Controller, index: i32) -> QString;
         #[qinvokable]
         fn volume_mount_point(self: &Controller, index: i32) -> QString;
         #[qinvokable]
-        fn volume_is_mounted(self: &Controller, index: i32) -> bool;
+        fn volume_requires_unmount(self: &Controller, index: i32) -> bool;
         #[qinvokable]
         fn volume_source(self: &Controller, index: i32) -> QString;
         #[qinvokable]
@@ -267,6 +270,7 @@ pub struct ControllerRust {
     analyzing_volume_id: QString,
     active_operation: QString,
     volume_count: i32,
+    volume_revision: i32,
     map_revision: i32,
     analysis_revision: i32,
     display_map_generation: i32,
@@ -322,6 +326,7 @@ impl Default for ControllerRust {
             analyzing_volume_id: QString::default(),
             active_operation: QString::default(),
             volume_count: 0,
+            volume_revision: 0,
             map_revision: 0,
             analysis_revision: 0,
             display_map_generation: 0,
@@ -410,7 +415,6 @@ impl qobject::Controller {
         match client.list_volumes() {
             Ok(volumes) => {
                 let count = count_i32(volumes.len());
-                self.as_mut().set_volume_count(0);
                 self.as_mut()
                     .rust_mut()
                     .analyses
@@ -422,6 +426,8 @@ impl qobject::Controller {
                 self.as_mut().rust_mut().volumes = volumes;
                 self.as_mut().rust_mut().client = Some(client);
                 self.as_mut().set_volume_count(count);
+                let revision = self.volume_revision.wrapping_add(1).max(1);
+                self.as_mut().set_volume_revision(revision);
                 self.as_mut().set_status(QString::default());
             }
             Err(error) => self
@@ -540,6 +546,69 @@ impl qobject::Controller {
                     }
                 }
             }
+        });
+    }
+
+    fn unmount_and_analyze(mut self: Pin<&mut Self>, volume_id: &QString) {
+        if self.busy {
+            return;
+        }
+        let Ok(volume_id) = volume_id.to_string().parse::<u64>() else {
+            self.as_mut()
+                .set_status(QString::from("Select a valid volume first"));
+            return;
+        };
+        let volume_id = VolumeId(volume_id);
+        let Some(volume) = self.volumes.iter().find(|volume| volume.id == volume_id) else {
+            self.as_mut()
+                .set_status(QString::from("The selected volume is no longer available"));
+            return;
+        };
+        if volume.mount_state == MountState::Unmounted {
+            let volume_id = QString::from(&volume_id.0.to_string());
+            self.as_mut().analyze(&volume_id);
+            return;
+        }
+        if !matches!(volume.filesystem.as_str(), "fat" | "msdos" | "vfat") {
+            self.as_mut().set_status(QString::from(
+                "Automatic unmount is only available for classic FAT volumes",
+            ));
+            return;
+        }
+        let source = volume.source.clone();
+        let Some(client) = self.client.as_ref().cloned() else {
+            self.as_mut()
+                .set_status(QString::from("Refresh volumes to initialize the service"));
+            return;
+        };
+
+        self.as_mut().set_busy(true);
+        self.as_mut().set_active_operation(QString::from("unmount"));
+        self.as_mut()
+            .set_analyzing_volume_id(QString::from(&volume_id.0.to_string()));
+        self.as_mut()
+            .set_status(QString::from(&format!("Unmounting {source}…")));
+
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = client.unmount_volume(volume_id);
+            let _ = qt_thread.queue(move |mut controller| {
+                controller.as_mut().set_busy(false);
+                controller.as_mut().set_active_operation(QString::default());
+                controller
+                    .as_mut()
+                    .set_analyzing_volume_id(QString::default());
+                match result {
+                    Ok(()) => {
+                        controller.as_mut().refresh();
+                        let volume_id = QString::from(&volume_id.0.to_string());
+                        controller.as_mut().analyze(&volume_id);
+                    }
+                    Err(error) => controller.as_mut().set_status(QString::from(&format!(
+                        "Could not unmount {source}: {error}"
+                    ))),
+                }
+            });
         });
     }
 
@@ -811,9 +880,11 @@ impl qobject::Controller {
             })
     }
 
-    fn volume_is_mounted(&self, index: i32) -> bool {
-        self.volume_row(index)
-            .is_some_and(|volume| volume.mount_state != MountState::Unmounted)
+    fn volume_requires_unmount(&self, index: i32) -> bool {
+        self.volume_row(index).is_some_and(|volume| {
+            volume.mount_state != MountState::Unmounted
+                && matches!(volume.filesystem.as_str(), "fat" | "msdos" | "vfat")
+        })
     }
 
     fn volume_source(&self, index: i32) -> QString {

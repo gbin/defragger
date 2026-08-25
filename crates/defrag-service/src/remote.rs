@@ -67,6 +67,15 @@ impl PrivilegedClient {
         Ok(serde_json::from_str(&volumes)?)
     }
 
+    pub fn unmount_volume(&self, volume_id: VolumeId) -> Result<(), PrivilegedClientError> {
+        let _: Option<()> = self.proxy()?.call_with_flags(
+            "UnmountVolume",
+            MethodFlags::AllowInteractiveAuth.into(),
+            &(volume_id.0),
+        )?;
+        Ok(())
+    }
+
     /// Start a read-all-files analysis. This call deliberately permits an
     /// interactive PolicyKit challenge because it is made directly in
     /// response to the user pressing Analyze.
@@ -256,6 +265,10 @@ impl DevelopmentClient {
 
     pub fn list_volumes(&self) -> Result<Vec<Volume>, PrivilegedClientError> {
         self.inner.list_volumes()
+    }
+
+    pub fn unmount_volume(&self, volume_id: VolumeId) -> Result<(), PrivilegedClientError> {
+        self.inner.unmount_volume(volume_id)
     }
 
     pub fn start_analysis(

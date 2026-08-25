@@ -22,6 +22,9 @@ Kirigami.ApplicationWindow {
     readonly property bool selectedHasReport: hasSelectedVolume
         && controller.has_report
         && selectedVolumeId === String(controller.report_volume_id)
+    readonly property bool selectedRequiresUnmount: hasSelectedVolume
+        && controller.volume_revision >= 0
+        && controller.volume_requires_unmount(selectedIndex)
     readonly property bool selectedIsBeingAnalyzed: hasSelectedVolume
         && controller.busy
         && controller.active_operation === "analysis"
@@ -75,6 +78,8 @@ Kirigami.ApplicationWindow {
                     planWindow.raise()
                     planWindow.requestActivate()
                 } else {
+                    planUnavailableDialog.targetVolumeId = window.selectedVolumeId
+                    planUnavailableDialog.requiresUnmount = window.selectedRequiresUnmount
                     planUnavailableDialog.open()
                 }
             }
@@ -187,9 +192,25 @@ Kirigami.ApplicationWindow {
                     }
                     delegate: Rectangle {
                         required property int index
-                        readonly property string volumeId: controller.volume_id(index)
-                        readonly property string mountPoint: controller.volume_mount_point(index)
+                        readonly property int volumeRevision: controller.volume_revision
+                        readonly property string volumeId: {
+                            const revision = volumeRevision
+                            return controller.volume_id(index)
+                        }
+                        readonly property string mountPoint: {
+                            const revision = volumeRevision
+                            return controller.volume_mount_point(index)
+                        }
+                        readonly property string source: {
+                            const revision = volumeRevision
+                            return controller.volume_source(index)
+                        }
+                        readonly property string filesystem: {
+                            const revision = volumeRevision
+                            return controller.volume_filesystem(index)
+                        }
                         readonly property int statsRevision: controller.analysis_revision
+                            + volumeRevision
                         readonly property double capacityBytes: {
                             const revision = statsRevision
                             return controller.volume_capacity_bytes(index)
@@ -205,7 +226,7 @@ Kirigami.ApplicationWindow {
                             x: volumeTable.deviceColumnX
                             width: volumeTable.deviceColumnWidth
                             height: parent.height
-                            text: controller.volume_source(index)
+                            text: source
                             elide: Text.ElideMiddle
                             verticalAlignment: Text.AlignVCenter
                         }
@@ -221,7 +242,7 @@ Kirigami.ApplicationWindow {
                             x: volumeTable.filesystemColumnX
                             width: 56
                             height: parent.height
-                            text: controller.volume_filesystem(index)
+                            text: filesystem
                             elide: Text.ElideRight
                             verticalAlignment: Text.AlignVCenter
                         }
@@ -568,10 +589,10 @@ Kirigami.ApplicationWindow {
             Layout.fillWidth: true
             Controls.Button { text: qsTr("Analyze"); icon.name: "system-search"; enabled: window.selectedIndex >= 0 && !controller.busy; onClicked: window.analyzeSelected() }
             Controls.Button { text: qsTr("Defragment…"); icon.name: "drive-harddisk"; enabled: !controller.busy && window.selectedHasReport; onClicked: controller.build_plan() }
-            Controls.Button { text: qsTr("Compact…"); icon.name: "transform-move"; enabled: !controller.busy && window.selectedHasReport && controller.volume_can_compact(window.selectedIndex); onClicked: controller.build_compact_plan() }
+            Controls.Button { text: qsTr("Compact…"); icon.name: "transform-move"; enabled: !controller.busy && window.selectedHasReport && (window.selectedRequiresUnmount || controller.volume_can_compact(window.selectedIndex)); onClicked: controller.build_compact_plan() }
             Item { Layout.preferredWidth: Kirigami.Units.largeSpacing }
-            Controls.Button { text: controller.paused ? qsTr("Resume") : qsTr("Pause"); enabled: controller.busy; onClicked: controller.paused ? controller.resume() : controller.pause() }
-            Controls.Button { text: qsTr("Stop"); icon.name: "process-stop"; enabled: controller.busy; onClicked: controller.stop() }
+            Controls.Button { text: controller.paused ? qsTr("Resume") : qsTr("Pause"); enabled: controller.busy && controller.active_operation !== "unmount"; onClicked: controller.paused ? controller.resume() : controller.pause() }
+            Controls.Button { text: qsTr("Stop"); icon.name: "process-stop"; enabled: controller.busy && controller.active_operation !== "unmount"; onClicked: controller.stop() }
             Item { Layout.fillWidth: true }
             Controls.BusyIndicator { running: controller.busy; visible: running; Layout.preferredWidth: 26; Layout.preferredHeight: 26 }
         }
@@ -685,19 +706,41 @@ Kirigami.ApplicationWindow {
 
     Controls.Dialog {
         id: planUnavailableDialog
+        property string targetVolumeId: ""
+        property bool requiresUnmount: false
         anchors.centerIn: parent
         modal: true
         title: controller.plan_is_compact
             ? qsTr("Cannot compact this volume")
             : qsTr("Cannot defragment this volume")
-        standardButtons: Controls.Dialog.Ok
         width: Math.min(560, window.width - 2 * Kirigami.Units.largeSpacing)
         contentItem: Controls.Label {
-            text: controller.plan_message.length > 0
+            text: (controller.plan_message.length > 0
                 ? controller.plan_message
-                : qsTr("Optimization is unavailable for this volume.")
+                : qsTr("Optimization is unavailable for this volume."))
+                + (planUnavailableDialog.requiresUnmount
+                    ? qsTr("\n\nUnmount it now and analyze it again? Open files may prevent a normal unmount.")
+                    : "")
             wrapMode: Text.Wrap
             width: planUnavailableDialog.availableWidth
+        }
+        footer: Controls.DialogButtonBox {
+            Controls.Button {
+                visible: planUnavailableDialog.requiresUnmount
+                text: qsTr("Cancel")
+                Controls.DialogButtonBox.buttonRole: Controls.DialogButtonBox.RejectRole
+            }
+            Controls.Button {
+                text: planUnavailableDialog.requiresUnmount
+                    ? qsTr("Unmount and analyze again") : qsTr("OK")
+                Controls.DialogButtonBox.buttonRole: Controls.DialogButtonBox.AcceptRole
+            }
+            onAccepted: {
+                planUnavailableDialog.close()
+                if (planUnavailableDialog.requiresUnmount)
+                    controller.unmount_and_analyze(planUnavailableDialog.targetVolumeId)
+            }
+            onRejected: planUnavailableDialog.close()
         }
     }
 

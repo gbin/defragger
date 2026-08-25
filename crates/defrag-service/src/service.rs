@@ -36,6 +36,8 @@ pub enum ServiceError {
     PlanNotFound(PlanId),
     #[error("defragmentation execution is unavailable for this plan")]
     ExecutionUnavailable,
+    #[error("automatic unmount is unavailable: {0}")]
+    UnmountUnavailable(String),
     #[error("{mode:?} optimization is not supported for {filesystem}")]
     UnsupportedOptimizationMode {
         filesystem: String,
@@ -85,6 +87,21 @@ impl InProcessClient {
 
     pub fn list_volumes(&self) -> Result<Vec<Volume>, ServiceError> {
         mounts::discover(&self.inner.backends)
+    }
+
+    pub fn unmount_volume(&self, volume_id: VolumeId) -> Result<(), ServiceError> {
+        let volume = self
+            .list_volumes()?
+            .into_iter()
+            .find(|volume| volume.id == volume_id)
+            .ok_or(ServiceError::VolumeNotFound(volume_id))?;
+        if !matches!(volume.filesystem.as_str(), "fat" | "msdos" | "vfat") {
+            return Err(ServiceError::UnmountUnavailable(format!(
+                "{} does not require offline FAT access",
+                volume.filesystem
+            )));
+        }
+        mounts::unmount(&volume)
     }
 
     pub fn start_analysis(&self, volume_id: VolumeId) -> Result<JobHandle, ServiceError> {
