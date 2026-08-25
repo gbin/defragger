@@ -36,6 +36,11 @@ integration-test:
 integration-test-fat:
     crates/defrag-service/tests/fixtures/run-fat-fixtures.sh
 
+# Fill a disposable mounted ext4/FAT/exFAT volume with a heavily fragmented
+# fixture without modifying its existing files.
+trash-fragmentation mount:
+    crates/defrag-service/tests/fixtures/trash-mounted-fragmentation.sh {{quote(mount)}}
+
 # Build the production split-service configuration without installing it.
 system-build:
     cmake -S . -B build/system -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr

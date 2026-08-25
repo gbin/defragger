@@ -70,9 +70,13 @@ Kirigami.ApplicationWindow {
         }
         onPlan_revisionChanged: {
             if (plan_revision > 0) {
-                planWindow.show()
-                planWindow.raise()
-                planWindow.requestActivate()
+                if (plan_available) {
+                    planWindow.show()
+                    planWindow.raise()
+                    planWindow.requestActivate()
+                } else {
+                    planUnavailableDialog.open()
+                }
             }
         }
     }
@@ -110,23 +114,81 @@ Kirigami.ApplicationWindow {
         spacing: Kirigami.Units.smallSpacing
 
         Rectangle {
+            id: volumeTable
             Layout.fillWidth: true
-            Layout.preferredHeight: 190
+            Layout.preferredHeight: 224
             color: Kirigami.Theme.backgroundColor
             border.color: Kirigami.Theme.disabledTextColor
             border.width: 1
 
-            Item {
+            readonly property real tableContentWidth: Math.max(960, width - 2)
+            readonly property real extraColumnWidth: Math.max(0, tableContentWidth - 960)
+            readonly property real mountPointColumnWidth: 116
+                + Math.min(184, extraColumnWidth * 0.55)
+            readonly property real deviceColumnWidth: 140
+                + Math.min(140, extraColumnWidth * 0.45)
+            readonly property real deviceColumnX: 10
+            readonly property real mountPointColumnX: deviceColumnX
+                + deviceColumnWidth + 6
+            readonly property real filesystemColumnX: mountPointColumnX
+                + mountPointColumnWidth + 6
+            readonly property real sizeColumnX: filesystemColumnX + 62
+            readonly property real usedColumnX: sizeColumnX + 74
+            readonly property real freeColumnX: usedColumnX + 74
+            readonly property real usageColumnX: freeColumnX + 74
+            readonly property real fragmentedColumnX: usageColumnX + 106
+            readonly property real analysisColumnX: fragmentedColumnX + 84
+
+            ColumnLayout {
                 anchors.fill: parent
+                anchors.margins: 1
+                spacing: 0
+
+                Item {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 28
+                    clip: true
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: Kirigami.Theme.alternateBackgroundColor
+                    }
+
+                    Item {
+                        x: -volumeList.contentX
+                        width: volumeTable.tableContentWidth
+                        height: parent.height
+
+                        Controls.Label { x: volumeTable.deviceColumnX; width: volumeTable.deviceColumnWidth; height: parent.height; text: qsTr("Device"); font.bold: true; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.mountPointColumnX; width: volumeTable.mountPointColumnWidth; height: parent.height; text: qsTr("Mount point"); font.bold: true; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.filesystemColumnX; width: 56; height: parent.height; text: qsTr("FS"); font.bold: true; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.sizeColumnX; width: 68; height: parent.height; text: qsTr("Size"); font.bold: true; horizontalAlignment: Text.AlignRight; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.usedColumnX; width: 68; height: parent.height; text: qsTr("Used"); font.bold: true; horizontalAlignment: Text.AlignRight; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.freeColumnX; width: 68; height: parent.height; text: qsTr("Free"); font.bold: true; horizontalAlignment: Text.AlignRight; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.usageColumnX; width: 100; height: parent.height; text: qsTr("Usage"); font.bold: true; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.fragmentedColumnX; width: 78; height: parent.height; text: qsTr("Frag."); font.bold: true; horizontalAlignment: Text.AlignRight; verticalAlignment: Text.AlignVCenter }
+                        Controls.Label { x: volumeTable.analysisColumnX; width: parent.width - x - 10; height: parent.height; text: qsTr("Analysis"); font.bold: true; verticalAlignment: Text.AlignVCenter }
+                    }
+                }
+
                 ListView {
                     id: volumeList
-                    anchors.fill: parent
-                    anchors.margins: 1
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
                     clip: true
                     model: controller.volume_count
+                    contentWidth: volumeTable.tableContentWidth
+                    boundsBehavior: Flickable.StopAtBounds
+                    Controls.ScrollBar.vertical: Controls.ScrollBar {
+                        policy: Controls.ScrollBar.AlwaysOn
+                    }
+                    Controls.ScrollBar.horizontal: Controls.ScrollBar {
+                        policy: Controls.ScrollBar.AsNeeded
+                    }
                     delegate: Rectangle {
                         required property int index
                         readonly property string volumeId: controller.volume_id(index)
+                        readonly property string mountPoint: controller.volume_mount_point(index)
                         readonly property int statsRevision: controller.analysis_revision
                         readonly property double capacityBytes: {
                             const revision = statsRevision
@@ -136,70 +198,113 @@ Kirigami.ApplicationWindow {
                             const revision = statsRevision
                             return controller.volume_used_bytes(index)
                         }
-                        width: volumeList.width
+                        width: volumeTable.tableContentWidth
                         height: 38
                         color: window.selectedIndex === index ? Kirigami.Theme.highlightColor : (index % 2 ? Kirigami.Theme.alternateBackgroundColor : Kirigami.Theme.backgroundColor)
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 10; anchors.rightMargin: 10
-                            spacing: 8
-                            Kirigami.Icon { source: "drive-harddisk"; Layout.preferredWidth: 20; Layout.preferredHeight: 20 }
-                            Controls.Label { text: controller.volume_mount_point(index) + "  (" + controller.volume_source(index) + ")"; elide: Text.ElideMiddle; Layout.preferredWidth: 200 }
-                            Controls.Label { text: controller.volume_filesystem(index); Layout.preferredWidth: 80 }
-                            Controls.Label { text: window.bytes(capacityBytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
-                            Controls.Label { text: window.bytes(usedBytes); Layout.preferredWidth: 85; horizontalAlignment: Text.AlignRight }
-                            Controls.Label {
-                                text: {
-                                    const revision = statsRevision
-                                    return window.bytes(controller.volume_free_bytes(index))
-                                }
-                                Layout.preferredWidth: 85
-                                horizontalAlignment: Text.AlignRight
+                        Controls.Label {
+                            x: volumeTable.deviceColumnX
+                            width: volumeTable.deviceColumnWidth
+                            height: parent.height
+                            text: controller.volume_source(index)
+                            elide: Text.ElideMiddle
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Controls.Label {
+                            x: volumeTable.mountPointColumnX
+                            width: volumeTable.mountPointColumnWidth
+                            height: parent.height
+                            text: mountPoint.length > 0 ? mountPoint : "—"
+                            elide: Text.ElideMiddle
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Controls.Label {
+                            x: volumeTable.filesystemColumnX
+                            width: 56
+                            height: parent.height
+                            text: controller.volume_filesystem(index)
+                            elide: Text.ElideRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Controls.Label {
+                            x: volumeTable.sizeColumnX
+                            width: 68
+                            height: parent.height
+                            text: window.bytes(capacityBytes)
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Controls.Label {
+                            x: volumeTable.usedColumnX
+                            width: 68
+                            height: parent.height
+                            text: window.bytes(usedBytes)
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Controls.Label {
+                            x: volumeTable.freeColumnX
+                            width: 68
+                            height: parent.height
+                            text: {
+                                const revision = statsRevision
+                                return window.bytes(controller.volume_free_bytes(index))
                             }
-                            Item {
-                                Layout.preferredWidth: 120
-                                Layout.preferredHeight: 16
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Item {
+                            x: volumeTable.usageColumnX
+                            width: 100
+                            height: 16
+                            anchors.verticalCenter: parent.verticalCenter
+                            Rectangle {
+                                anchors.fill: parent
+                                anchors.topMargin: 2; anchors.bottomMargin: 2
+                                radius: 5
+                                color: Kirigami.Theme.alternateBackgroundColor
+                                border.color: Kirigami.Theme.disabledTextColor
                                 Rectangle {
-                                    anchors.fill: parent
-                                    anchors.topMargin: 2; anchors.bottomMargin: 2
-                                    radius: 5
-                                    color: Kirigami.Theme.alternateBackgroundColor
-                                    border.color: Kirigami.Theme.disabledTextColor
-                                    Rectangle {
-                                        height: parent.height
-                                        width: parent.width * (capacityBytes > 0 ? usedBytes / capacityBytes : 0)
-                                        radius: parent.radius
-                                        color: Kirigami.Theme.highlightColor
-                                    }
-                                }
-                                Controls.Label {
-                                    anchors.centerIn: parent
-                                    text: capacityBytes > 0 ? Math.round(usedBytes * 100 / capacityBytes) + "%" : "—"
-                                    font.pixelSize: Kirigami.Theme.smallFont.pixelSize
+                                    height: parent.height
+                                    width: parent.width * (capacityBytes > 0 ? usedBytes / capacityBytes : 0)
+                                    radius: parent.radius
+                                    color: Kirigami.Theme.highlightColor
                                 }
                             }
                             Controls.Label {
-                                text: {
-                                    const revision = controller.analysis_revision
-                                    return controller.volume_has_report(index)
-                                        ? window.percent(controller.volume_fragmented_basis_points(index)) : "—"
-                                }
-                                Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight
+                                anchors.centerIn: parent
+                                text: capacityBytes > 0 ? Math.round(usedBytes * 100 / capacityBytes) + "%" : "—"
+                                font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                             }
-                            Controls.Label {
-                                text: {
-                                    const revision = controller.analysis_revision
-                                    return controller.busy && String(controller.analyzing_volume_id) === volumeId
-                                        ? (controller.active_operation === "compaction"
-                                            ? qsTr("Compacting…")
-                                            : (controller.active_operation === "defragmentation"
-                                                ? qsTr("Defragmenting…") : qsTr("Analyzing…")))
-                                        : (controller.volume_has_report(index)
-                                            ? qsTr("Analyzed")
-                                            : (controller.volume_supported(index) ? "" : qsTr("Unsupported")))
-                                }
-                                Layout.fillWidth: true
+                        }
+                        Controls.Label {
+                            x: volumeTable.fragmentedColumnX
+                            width: 78
+                            height: parent.height
+                            text: {
+                                const revision = controller.analysis_revision
+                                return controller.volume_has_report(index)
+                                    ? window.percent(controller.volume_fragmented_basis_points(index)) : "—"
                             }
+                            horizontalAlignment: Text.AlignRight
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        Controls.Label {
+                            x: volumeTable.analysisColumnX
+                            width: parent.width - x - 10
+                            height: parent.height
+                            text: {
+                                const revision = controller.analysis_revision
+                                return controller.busy && String(controller.analyzing_volume_id) === volumeId
+                                    ? (controller.active_operation === "compaction"
+                                        ? qsTr("Compacting…")
+                                        : (controller.active_operation === "defragmentation"
+                                            ? qsTr("Defragmenting…") : qsTr("Analyzing…")))
+                                    : (controller.volume_has_report(index)
+                                        ? qsTr("Analyzed")
+                                        : (controller.volume_supported(index) ? "" : qsTr("Unsupported")))
+                            }
+                            elide: Text.ElideRight
+                            verticalAlignment: Text.AlignVCenter
                         }
                         MouseArea { anchors.fill: parent; onClicked: window.selectedIndex = index; onDoubleClicked: window.analyzeSelected() }
                     }
@@ -211,6 +316,7 @@ Kirigami.ApplicationWindow {
                     }
                 }
             }
+
         }
 
         DriveMap {
@@ -493,9 +599,11 @@ Kirigami.ApplicationWindow {
 
             Controls.Label {
                 Layout.fillWidth: true
-                text: controller.plan_is_compact
-                    ? qsTr("Compaction may move already-contiguous supporting files. The volume must remain unmounted.")
-                    : qsTr("Each file is revalidated immediately before it is moved.")
+                text: controller.plan_message.length > 0
+                    ? controller.plan_message
+                    : (controller.plan_is_compact
+                        ? qsTr("Compaction may move already-contiguous supporting files. The volume must remain unmounted.")
+                        : qsTr("Each file is revalidated immediately before it is moved."))
                 font.bold: true
                 color: Kirigami.Theme.neutralTextColor
                 wrapMode: Text.Wrap
@@ -551,6 +659,11 @@ Kirigami.ApplicationWindow {
                         }
                     }
                 }
+                Kirigami.PlaceholderMessage {
+                    anchors.centerIn: parent
+                    visible: controller.plan_candidate_count === 0
+                    text: qsTr("No eligible fragmented files were found.")
+                }
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -559,13 +672,32 @@ Kirigami.ApplicationWindow {
                 Controls.Button {
                     text: controller.plan_is_compact ? qsTr("Start compaction") : qsTr("Start defragmentation")
                     icon.name: "media-playback-start"
-                    enabled: controller.plan_candidate_count > 0 && !controller.busy
+                    enabled: controller.plan_available
+                        && controller.plan_candidate_count > 0 && !controller.busy
                     onClicked: {
                         planWindow.close()
                         controller.start_defrag()
                     }
                 }
             }
+        }
+    }
+
+    Controls.Dialog {
+        id: planUnavailableDialog
+        anchors.centerIn: parent
+        modal: true
+        title: controller.plan_is_compact
+            ? qsTr("Cannot compact this volume")
+            : qsTr("Cannot defragment this volume")
+        standardButtons: Controls.Dialog.Ok
+        width: Math.min(560, window.width - 2 * Kirigami.Units.largeSpacing)
+        contentItem: Controls.Label {
+            text: controller.plan_message.length > 0
+                ? controller.plan_message
+                : qsTr("Optimization is unavailable for this volume.")
+            wrapMode: Text.Wrap
+            width: planUnavailableDialog.availableWidth
         }
     }
 

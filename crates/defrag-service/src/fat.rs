@@ -613,10 +613,14 @@ impl FilesystemAnalysis for FatAnalysis {
 
     fn build_plan(&self, policy: &DefragPolicy) -> Result<Box<dyn PreparedPlan>, ServiceError> {
         let Some(snapshot) = &self.snapshot else {
-            return Ok(Box::new(FatPlan::unavailable(
-                self.report.clone(),
-                "FAT execution requires a complete raw-device analysis of an unmounted volume.",
-            )));
+            let warning = if self.report.volume.filesystem == "exfat" {
+                "exFAT defragmentation is not implemented; this volume is analysis-only."
+            } else if self.report.volume.mount_state != MountState::Unmounted {
+                "Unmount this FAT volume, refresh the volume list, and analyze it again before defragmenting. FAT writes require exclusive raw-device access."
+            } else {
+                "FAT execution requires a complete raw-device analysis of an unmounted volume. Analyze the volume again before defragmenting."
+            };
+            return Ok(Box::new(FatPlan::unavailable(self.report.clone(), warning)));
         };
         if !snapshot.writable() {
             return Ok(Box::new(FatPlan::unavailable(
@@ -1308,6 +1312,57 @@ mod tests {
             backend.probe(&volume("ext4")),
             SupportStatus::Unsupported { .. }
         ));
+    }
+
+    #[test]
+    fn mounted_fat_plan_explains_the_unmount_and_reanalysis_workflow() {
+        let analysis = FatAnalysis {
+            report: AnalysisReport {
+                volume: volume("vfat"),
+                completeness: AnalysisCompleteness::Partial,
+                coverage: ScanCoverage::default(),
+                fragmentation: FragmentationMetrics::default(),
+                files: Vec::new(),
+                map: Vec::new(),
+                warnings: Vec::new(),
+            },
+            snapshot: None,
+        };
+
+        let plan = analysis.build_plan(&DefragPolicy::default()).unwrap();
+
+        assert!(!plan.summary().requirements.available_in_this_build);
+        assert!(plan.summary().candidates.is_empty());
+        assert_eq!(
+            plan.summary().warnings,
+            [
+                "Unmount this FAT volume, refresh the volume list, and analyze it again before defragmenting. FAT writes require exclusive raw-device access."
+            ]
+        );
+    }
+
+    #[test]
+    fn exfat_plan_does_not_suggest_that_unmounting_enables_writes() {
+        let analysis = FatAnalysis {
+            report: AnalysisReport {
+                volume: volume("exfat"),
+                completeness: AnalysisCompleteness::Partial,
+                coverage: ScanCoverage::default(),
+                fragmentation: FragmentationMetrics::default(),
+                files: Vec::new(),
+                map: Vec::new(),
+                warnings: Vec::new(),
+            },
+            snapshot: None,
+        };
+
+        let plan = analysis.build_plan(&DefragPolicy::default()).unwrap();
+
+        assert!(!plan.summary().requirements.available_in_this_build);
+        assert_eq!(
+            plan.summary().warnings,
+            ["exFAT defragmentation is not implemented; this volume is analysis-only."]
+        );
     }
 
     #[test]

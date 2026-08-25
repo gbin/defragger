@@ -31,3 +31,31 @@ kernel filesystem driver.
 
 Run `just integration-test-fat` as your normal user. The runtime implementation
 does not invoke `fsck.fat`; it is an independent integration-test oracle.
+
+## Mounted-volume fragmentation stress fixture
+
+To deliberately fragment a disposable mounted ext4, FAT, or exFAT filesystem,
+run this from the repository root:
+
+```sh
+just trash-fragmentation /mnt/disposable
+```
+
+The path must be an exact mount point, cannot be `/`, and must be writable by
+the invoking user. For a root-owned test mount, explicitly run the recipe as
+`sudo just trash-fragmentation /mnt/disposable`. The recipe consumes 96% of the
+space that was free when it started, creates alternating allocation slots,
+deletes half, and cycles writes to multiple payload files through the resulting
+holes. Finally it removes a large allocation anchor so the defragmenter has
+contiguous workspace.
+
+The filesystem becomes nearly full during the run and sees substantial writes
+when `fallocate` is unavailable. Existing files are not changed or removed, but
+other applications using the filesystem may run out of space temporarily. The
+recipe refuses to replace a previous fixture directory.
+After testing, reclaim the space by removing the single
+`.defragger-fragmentation-fixture` directory from that mount.
+
+For unusual fixture sizes, `DEFRAGGER_FRAGMENT_FILL_PERCENT` can be set from 80
+through 98 and `DEFRAGGER_FRAGMENT_SLOT_COUNT` can be set to an even value from
+128 through 16384.

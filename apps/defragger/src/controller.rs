@@ -33,6 +33,8 @@ mod qobject {
         #[qproperty(f64, plan_target_fragment_count)]
         #[qproperty(i32, plan_revision)]
         #[qproperty(bool, plan_is_compact)]
+        #[qproperty(bool, plan_available)]
+        #[qproperty(QString, plan_message)]
         #[qproperty(bool, busy)]
         #[qproperty(bool, paused)]
         #[qproperty(bool, has_report)]
@@ -68,6 +70,8 @@ mod qobject {
         fn volume_id(self: &Controller, index: i32) -> QString;
         #[qinvokable]
         fn volume_mount_point(self: &Controller, index: i32) -> QString;
+        #[qinvokable]
+        fn volume_is_mounted(self: &Controller, index: i32) -> bool;
         #[qinvokable]
         fn volume_source(self: &Controller, index: i32) -> QString;
         #[qinvokable]
@@ -131,7 +135,8 @@ use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QString};
 use defrag_domain::{
     AnalysisId, AnalysisReport, CategoryMix, DefragPolicy, FileReport, MapBin, MetadataMix,
-    PhysicalRange, PlanCandidate, PlanId, ServiceEvent, SupportStatus, Volume, VolumeId,
+    MountState, PhysicalRange, PlanCandidate, PlanId, ServiceEvent, SupportStatus, Volume,
+    VolumeId,
 };
 #[cfg(all(feature = "development-service", not(feature = "system-helper")))]
 use defrag_service::DevelopmentClient as AppClient;
@@ -216,6 +221,10 @@ enum JobOperation {
 
 struct UiReport {
     volume_id: VolumeId,
+    mount_id: Option<u64>,
+    mount_state: MountState,
+    filesystem: String,
+    uuid: Option<String>,
     capacity_bytes: u64,
     used_bytes: Option<u64>,
     free_bytes: Option<u64>,
@@ -233,6 +242,10 @@ struct UiReport {
 #[derive(Clone)]
 struct CachedAnalysis {
     analysis_id: Option<AnalysisId>,
+    mount_id: Option<u64>,
+    mount_state: MountState,
+    filesystem: String,
+    uuid: Option<String>,
     fragmented_basis_points: i32,
     coverage_basis_points: i32,
     files_scanned: f64,
@@ -266,6 +279,8 @@ pub struct ControllerRust {
     plan_target_fragment_count: f64,
     plan_revision: i32,
     plan_is_compact: bool,
+    plan_available: bool,
+    plan_message: QString,
     busy: bool,
     paused: bool,
     has_report: bool,
@@ -319,6 +334,8 @@ impl Default for ControllerRust {
             plan_target_fragment_count: 0.0,
             plan_revision: 0,
             plan_is_compact: false,
+            plan_available: false,
+            plan_message: QString::default(),
             busy: false,
             paused: false,
             has_report: false,
@@ -394,6 +411,14 @@ impl qobject::Controller {
             Ok(volumes) => {
                 let count = count_i32(volumes.len());
                 self.as_mut().set_volume_count(0);
+                self.as_mut()
+                    .rust_mut()
+                    .analyses
+                    .retain(|volume_id, analysis| {
+                        volumes.iter().any(|volume| {
+                            volume.id == *volume_id && analysis.matches_volume(volume)
+                        })
+                    });
                 self.as_mut().rust_mut().volumes = volumes;
                 self.as_mut().rust_mut().client = Some(client);
                 self.as_mut().set_volume_count(count);
@@ -591,6 +616,8 @@ impl qobject::Controller {
         match client.build_plan(analysis_id, &policy) {
             Ok((plan_id, plan)) => {
                 let count = count_i32(plan.candidates.len());
+                let available = plan.requirements.available_in_this_build;
+                let message = plan.warnings.join("\n");
                 let estimated_rewrite_bytes = plan.estimated_rewrite_bytes as f64;
                 let current_fragment_count = plan
                     .candidates
@@ -603,10 +630,12 @@ impl qobject::Controller {
                     .map(|candidate| u64::from(candidate.target_runs))
                     .sum::<u64>() as f64;
                 self.as_mut().rust_mut().plan_candidates = plan.candidates;
-                self.as_mut().rust_mut().plan_id = Some(plan_id);
+                self.as_mut().rust_mut().plan_id = available.then_some(plan_id);
                 self.as_mut().set_plan_candidate_count(count);
                 self.as_mut()
                     .set_plan_is_compact(mode == defrag_domain::OptimizationMode::Compact);
+                self.as_mut().set_plan_available(available);
+                self.as_mut().set_plan_message(QString::from(&message));
                 self.as_mut()
                     .set_plan_estimated_rewrite_bytes(estimated_rewrite_bytes);
                 self.as_mut()
@@ -615,13 +644,13 @@ impl qobject::Controller {
                     .set_plan_target_fragment_count(target_fragment_count);
                 let revision = self.plan_revision.wrapping_add(1).max(1);
                 self.as_mut().set_plan_revision(revision);
-                self.as_mut().set_status(QString::from(
-                    if mode == defrag_domain::OptimizationMode::Compact {
-                        "Compaction plan ready"
-                    } else {
-                        "Defragmentation plan ready"
-                    },
-                ));
+                self.as_mut().set_status(QString::from(if !available {
+                    &message
+                } else if mode == defrag_domain::OptimizationMode::Compact {
+                    "Compaction plan ready"
+                } else {
+                    "Defragmentation plan ready"
+                }));
             }
             Err(error) => self
                 .as_mut()
@@ -773,14 +802,18 @@ impl qobject::Controller {
     fn volume_mount_point(&self, index: i32) -> QString {
         self.volume_row(index)
             .map_or_else(QString::default, |volume| {
-                QString::from(
-                    &volume
-                        .mount_point
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "Unmounted".to_owned()),
-                )
+                volume
+                    .mount_point
+                    .as_ref()
+                    .map_or_else(QString::default, |path| {
+                        QString::from(&path.display().to_string())
+                    })
             })
+    }
+
+    fn volume_is_mounted(&self, index: i32) -> bool {
+        self.volume_row(index)
+            .is_some_and(|volume| volume.mount_state != MountState::Unmounted)
     }
 
     fn volume_source(&self, index: i32) -> QString {
@@ -929,6 +962,8 @@ impl qobject::Controller {
         self.as_mut().set_plan_current_fragment_count(0.0);
         self.as_mut().set_plan_target_fragment_count(0.0);
         self.as_mut().set_plan_revision(0);
+        self.as_mut().set_plan_available(false);
+        self.as_mut().set_plan_message(QString::default());
         self.as_mut().set_has_report(false);
         self.as_mut().set_files_scanned(0.0);
         self.as_mut().set_bytes_scanned(0.0);
@@ -1196,6 +1231,10 @@ fn cache_report(report: UiReport, analysis_id: Option<AnalysisId>) -> (VolumeId,
         volume_id,
         CachedAnalysis {
             analysis_id,
+            mount_id: report.mount_id,
+            mount_state: report.mount_state,
+            filesystem: report.filesystem,
+            uuid: report.uuid,
             fragmented_basis_points: report.fragmented_basis_points,
             coverage_basis_points: report.coverage_basis_points,
             files_scanned: report.files_scanned,
@@ -1208,6 +1247,15 @@ fn cache_report(report: UiReport, analysis_id: Option<AnalysisId>) -> (VolumeId,
             map_file_ranges: Arc::new(ranges),
         },
     )
+}
+
+impl CachedAnalysis {
+    fn matches_volume(&self, volume: &Volume) -> bool {
+        self.mount_id == volume.mount_id
+            && self.mount_state == volume.mount_state
+            && self.filesystem == volume.filesystem
+            && self.uuid == volume.uuid
+    }
 }
 
 fn update_volume_occupancy(volumes: &mut [Volume], report: &UiReport) {
@@ -1272,6 +1320,10 @@ fn prepare_ui_report(report: Box<AnalysisReport>) -> UiReport {
         .collect();
     UiReport {
         volume_id: report.volume.id,
+        mount_id: report.volume.mount_id,
+        mount_state: report.volume.mount_state,
+        filesystem: report.volume.filesystem.clone(),
+        uuid: report.volume.uuid.clone(),
         capacity_bytes: report.volume.capacity_bytes,
         used_bytes: report.volume.used_bytes,
         free_bytes: report.volume.free_bytes,
@@ -1585,6 +1637,51 @@ fn metadata_values(metadata: MetadataMix) -> [u16; 9] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_analysis_is_invalid_after_mount_state_changes() {
+        let analysis = CachedAnalysis {
+            analysis_id: None,
+            mount_id: Some(41),
+            mount_state: MountState::MountedReadWrite,
+            filesystem: "vfat".to_owned(),
+            uuid: Some("fixture".to_owned()),
+            fragmented_basis_points: 0,
+            coverage_basis_points: 0,
+            files_scanned: 0.0,
+            bytes_scanned: 0.0,
+            skipped_entries: 0.0,
+            status: String::new(),
+            map_bins: Vec::new(),
+            file_rows: Vec::new(),
+            map_files: Vec::new(),
+            map_file_ranges: Arc::default(),
+        };
+        let mut volume = Volume {
+            id: VolumeId(1),
+            mount_id: Some(41),
+            parent_mount_id: Some(1),
+            device_major: 8,
+            device_minor: 2,
+            mount_point: Some(PathBuf::from("/media/fixture")),
+            source: "/dev/sda2".to_owned(),
+            filesystem: "vfat".to_owned(),
+            label: None,
+            uuid: Some("fixture".to_owned()),
+            mount_state: MountState::MountedReadWrite,
+            read_only: false,
+            capacity_bytes: 1024,
+            used_bytes: Some(512),
+            free_bytes: Some(512),
+            support: SupportStatus::ReadOnly,
+        };
+
+        assert!(analysis.matches_volume(&volume));
+        volume.mount_id = None;
+        volume.mount_point = None;
+        volume.mount_state = MountState::Unmounted;
+        assert!(!analysis.matches_volume(&volume));
+    }
 
     #[test]
     fn display_paths_are_relative_to_the_filesystem_root() {
