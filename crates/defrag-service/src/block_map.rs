@@ -93,8 +93,20 @@ impl BinAccumulator {
     pub(crate) fn mark_staging(&mut self, physical: u64, length: u64) {
         let mut changed = Vec::new();
         self.for_overlaps_indexed(physical, length, |index, raw, overlap| {
-            let moved = raw[UNSCANNED_DATA].min(overlap);
-            raw[UNSCANNED_DATA] -= moved;
+            let mut remaining = overlap;
+            let mut moved = 0;
+            // A write destination is normally free, but compaction may first
+            // evacuate an occupied target. Staging is the transient visual
+            // state in either case; committed map updates replace it later.
+            for category in [FREE, UNSCANNED_DATA, CONTIGUOUS_DATA, FRAGMENTED_DATA] {
+                let amount = raw[category].min(remaining);
+                raw[category] -= amount;
+                remaining -= amount;
+                moved += amount;
+                if remaining == 0 {
+                    break;
+                }
+            }
             raw[DEFRAG_STAGING] = raw[DEFRAG_STAGING].saturating_add(moved);
             if moved > 0 {
                 changed.push(index);
@@ -248,5 +260,19 @@ mod tests {
         let bin = BinAccumulator::new(&ranges, 100, 1).finish().remove(0);
         assert_eq!(bin.mix.metadata.journal, 4000);
         assert_eq!(bin.mix.unscanned_data, 6000);
+    }
+
+    #[test]
+    fn staging_replaces_free_destination_bytes() {
+        let ranges = [FsMapRange {
+            physical: 0,
+            length: 100,
+            kind: FsMapKind::Free,
+        }];
+        let mut bins = BinAccumulator::new(&ranges, 100, 1);
+        bins.mark_staging(0, 25);
+        let bin = bins.finish().remove(0);
+        assert_eq!(bin.mix.free, 7500);
+        assert_eq!(bin.mix.defrag_staging, 2500);
     }
 }

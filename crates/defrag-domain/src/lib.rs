@@ -54,7 +54,7 @@ pub enum AnalysisCompleteness {
     Partial,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MetadataMix {
     pub filesystem_headers: u16,
     pub journal: u16,
@@ -67,7 +67,7 @@ pub struct MetadataMix {
     pub other: u16,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CategoryMix {
     pub free: u16,
     pub contiguous_data: u16,
@@ -78,7 +78,7 @@ pub struct CategoryMix {
     pub metadata: MetadataMix,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MapBin {
     pub offset_bytes: u64,
     pub length_bytes: u64,

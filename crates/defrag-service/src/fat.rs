@@ -904,7 +904,11 @@ fn execute_fat_plan(
     writer.mark_dirty()?;
 
     let mut report = plan.report.clone();
+    let mut staging_bins = bins_from_reports(expected, report.volume.capacity_bytes, &report.files);
+    let mut live_map = staging_bins.snapshot();
     let mut bytes_moved = 0u64;
+    let mut last_map_update = None;
+    let mut last_staging_update = Instant::now();
     for (completed, planned) in plan.moves.iter().enumerate() {
         let path = expected.files[planned.file_index].path.clone();
         events.defrag_progress(DefragProgress {
@@ -931,10 +935,19 @@ fn execute_fat_plan(
                         length_bytes: length,
                     }],
                 );
+                staging_bins.mark_staging(writing, length);
+                if last_staging_update.elapsed() >= Duration::from_millis(50) {
+                    publish_staging_changes(&mut staging_bins, &mut live_map, events);
+                    last_staging_update = Instant::now();
+                }
             },
         );
         match result {
-            Ok(moved) => bytes_moved = bytes_moved.saturating_add(moved),
+            Ok(moved) => {
+                bytes_moved = bytes_moved.saturating_add(moved);
+                events.defrag_activity(Vec::new(), Vec::new());
+                publish_staging_changes(&mut staging_bins, &mut live_map, events);
+            }
             Err(ServiceError::Cancelled) => {
                 writer.finish_clean()?;
                 events.defrag_activity(Vec::new(), Vec::new());
@@ -958,6 +971,21 @@ fn execute_fat_plan(
         replace_report_file(&mut report, updated.clone());
         recompute_raw_fragmentation(&mut report);
         events.defrag_file_updated(updated, report.fragmentation.clone(), bytes_moved);
+        if completed == 0
+            || last_map_update
+                .is_none_or(|updated: Instant| updated.elapsed() >= Duration::from_millis(200))
+        {
+            let snapshot = writer.reparse()?;
+            let next_bins = bins_from_snapshot(&snapshot, report.volume.capacity_bytes);
+            let next_map = next_bins.snapshot();
+            let changes = changed_map_bins(&live_map, &next_map);
+            if !changes.is_empty() {
+                events.map_updated(false, changes);
+            }
+            staging_bins = next_bins;
+            live_map = next_map;
+            last_map_update = Some(Instant::now());
+        }
         events.defrag_progress(DefragProgress {
             job_id,
             phase: DefragPhase::CommittingMetadata,
@@ -1049,14 +1077,75 @@ fn report_from_snapshot(volume: &Volume, snapshot: &ClassicSnapshot) -> Analysis
         warnings: snapshot.writable_issues.clone(),
     };
     recompute_raw_fragmentation(&mut report);
-    let mut bins = BinAccumulator::new(&snapshot.ranges, report.volume.capacity_bytes, 4096);
-    for file in &report.files {
+    report.map = map_from_reports(snapshot, report.volume.capacity_bytes, &report.files);
+    report
+}
+
+fn bins_from_snapshot(snapshot: &ClassicSnapshot, capacity_bytes: u64) -> BinAccumulator {
+    let files = snapshot
+        .files
+        .iter()
+        .map(|file| inspect_raw_file(file, snapshot, false))
+        .collect::<Vec<_>>();
+    bins_from_reports(snapshot, capacity_bytes, &files)
+}
+
+fn map_from_reports(
+    snapshot: &ClassicSnapshot,
+    capacity_bytes: u64,
+    files: &[FileReport],
+) -> Vec<defrag_domain::MapBin> {
+    bins_from_reports(snapshot, capacity_bytes, files).finish()
+}
+
+fn bins_from_reports(
+    snapshot: &ClassicSnapshot,
+    capacity_bytes: u64,
+    files: &[FileReport],
+) -> BinAccumulator {
+    let mut bins = BinAccumulator::new(&snapshot.ranges, capacity_bytes, 4096);
+    for file in files {
         for range in &file.physical_ranges {
             bins.mark_scanned(range.offset_bytes, range.length_bytes, file.excess_runs > 0);
         }
     }
-    report.map = bins.finish();
-    report
+    bins
+}
+
+fn publish_staging_changes(
+    bins: &mut BinAccumulator,
+    visible: &mut Vec<defrag_domain::MapBin>,
+    events: &dyn EventSink,
+) {
+    let changes = bins.take_changes();
+    if changes.is_empty() {
+        return;
+    }
+    merge_map_changes(visible, &changes);
+    events.map_updated(false, changes);
+}
+
+fn merge_map_changes(target: &mut Vec<defrag_domain::MapBin>, changes: &[defrag_domain::MapBin]) {
+    for bin in changes {
+        match target.binary_search_by_key(&bin.offset_bytes, |item| item.offset_bytes) {
+            Ok(index) => target[index] = bin.clone(),
+            Err(index) => target.insert(index, bin.clone()),
+        }
+    }
+}
+
+fn changed_map_bins(
+    previous: &[defrag_domain::MapBin],
+    next: &[defrag_domain::MapBin],
+) -> Vec<defrag_domain::MapBin> {
+    if previous.len() != next.len() {
+        return next.to_vec();
+    }
+    previous
+        .iter()
+        .zip(next)
+        .filter_map(|(previous, next)| (previous != next).then(|| next.clone()))
+        .collect()
 }
 
 fn replace_report_file(report: &mut AnalysisReport, updated: FileReport) {
@@ -1126,6 +1215,32 @@ mod tests {
         fn map_updated(&self, _: bool, _: Vec<defrag_domain::MapBin>) {}
         fn defrag_progress(&self, _: DefragProgress) {}
         fn defrag_activity(&self, _: Vec<PhysicalRange>, _: Vec<PhysicalRange>) {}
+        fn defrag_file_updated(&self, _: FileReport, _: FragmentationMetrics, _: u64) {}
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        map_updates: AtomicUsize,
+        staging_updates: AtomicUsize,
+        cleared_activity: AtomicUsize,
+    }
+
+    impl EventSink for RecordingSink {
+        fn progress(&self, _: JobProgress) {}
+        fn map_updated(&self, _: bool, bins: Vec<defrag_domain::MapBin>) {
+            if !bins.is_empty() {
+                self.map_updates.fetch_add(1, Ordering::Relaxed);
+            }
+            if bins.iter().any(|bin| bin.mix.defrag_staging > 0) {
+                self.staging_updates.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn defrag_progress(&self, _: DefragProgress) {}
+        fn defrag_activity(&self, reading: Vec<PhysicalRange>, writing: Vec<PhysicalRange>) {
+            if reading.is_empty() && writing.is_empty() {
+                self.cleared_activity.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         fn defrag_file_updated(&self, _: FileReport, _: FragmentationMetrics, _: u64) {}
     }
 
@@ -1259,11 +1374,15 @@ mod tests {
             .expect("plan FAT optimization");
         assert!(plan.summary().requirements.available_in_this_build);
         assert!(!plan.summary().candidates.is_empty());
+        let events = RecordingSink::default();
         let result = plan
-            .execute(JobId(2), &TestControl, &TestSink)
+            .execute(JobId(2), &TestControl, &events)
             .expect("execute FAT optimization");
         assert!(!result.stopped);
         assert!(result.report.fragmentation.total_excess_runs < before);
+        assert!(events.map_updates.load(Ordering::Relaxed) >= 2);
+        assert!(events.staging_updates.load(Ordering::Relaxed) >= 1);
+        assert!(events.cleared_activity.load(Ordering::Relaxed) >= 2);
 
         let disk = File::open(&image.0).unwrap();
         let filesystem = FileSystem::new(disk, FsOptions::new()).unwrap();

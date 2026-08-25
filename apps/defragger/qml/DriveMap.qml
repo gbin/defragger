@@ -125,10 +125,10 @@ Item {
     }
 
     function cellCategory(index) {
-        if (field(index, 2) > 0)
-            return 1
         if (field(index, 4) > 0)
             return 2
+        if (field(index, 2) > 0)
+            return 1
         let winner = -1
         let winnerValue = 0
         for (let i = 0; i < metadataTypes.length; ++i) {
